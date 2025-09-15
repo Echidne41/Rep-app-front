@@ -1,9 +1,7 @@
 import type { NextConfig } from "next";
-
 const nextConfig: NextConfig = {
   eslint: { ignoreDuringBuilds: true },
-  // Optional: uncomment if TS errors block the build
+  // safety net if TS complains during build:
   // typescript: { ignoreBuildErrors: true },
 };
-
 export default nextConfig;

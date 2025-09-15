@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+
 <<<<<<< HEAD
 <<<<<<< HEAD
 "use client";
