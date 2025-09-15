@@ -1,4 +1,5 @@
 <<<<<<< HEAD
+<<<<<<< HEAD
 "use client";
 import { useState } from "react";
 
@@ -196,6 +197,11 @@ export default function RepsPage() {
   );
 }
 =======
+=======
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+
+>>>>>>> 359e29b (build: disable no-explicit-any for deploy)
 "use client";
 import { useState } from "react";
 
