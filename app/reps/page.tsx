@@ -4,13 +4,29 @@ import { useState } from "react";
 
 type Vote = { bill: string; vote: string };
 type RawVoteMap = Record<string, string | number | null | undefined>;
-type Rep = { id?: string; name: string; party?: string; district?: string; email?: string; votes?: Vote[] | RawVoteMap };
-type Data = { formattedAddress?: string; geographies?: { sldl?: { name?: string } }; stateRepresentatives: Rep[] };
+type Rep = {
+  id?: string;
+  name: string;
+  party?: string;
+  district?: string;
+  email?: string;
+  votes?: Vote[] | RawVoteMap;
+};
+type Data = {
+  formattedAddress?: string;
+  geographies?: { sldl?: { name?: string } };
+  stateRepresentatives: Rep[] | Record<string, Rep>;
+};
 
 function toVotes(raw: Rep["votes"] | any): Vote[] {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw as Vote[];
-  if (typeof raw === "object") return Object.entries(raw as RawVoteMap).map(([bill, vote]) => ({ bill, vote: String(vote ?? "").trim() }));
+  if (typeof raw === "object") {
+    return Object.entries(raw as RawVoteMap).map(([bill, vote]) => ({
+      bill,
+      vote: String(vote ?? "").trim(),
+    }));
+  }
   return [];
 }
 
@@ -21,17 +37,31 @@ export default function RepsPage() {
   const [loading, setLoading] = useState(false);
 
   async function lookup() {
-    setLoading(true); setError(null); setData(null);
+    setLoading(true);
+    setError(null);
+    setData(null);
     try {
-      const base = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:5000";
-      const url  = `${base}/api/lookup-with-votes?address=${encodeURIComponent(addr)}&refreshVotes=1&ts=${Date.now()}`;
-      const res  = await fetch(url, { cache: "no-store" });
-      const j    = await res.json();
+      const base = (process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:5000").replace(/\/+$/, "");
+      const url = `${base}/api/lookup-with-votes?address=${encodeURIComponent(
+        addr
+      )}&refreshVotes=1&ts=${Date.now()}`;
+      const res = await fetch(url, { cache: "no-store" });
+      const j = await res.json();
       if (!res.ok || j?.success === false) throw new Error(j?.error?.message || `HTTP ${res.status}`);
       setData(j.data as Data);
-    } catch (e:any) { setError(e.message || "Failed to fetch"); }
-    finally { setLoading(false); }
+    } catch (e: any) {
+      setError(e.message || "Failed to fetch");
+    } finally {
+      setLoading(false);
+    }
   }
+
+  // Flatten reps (handles array OR object from API)
+  const reps: Rep[] = data
+    ? (Array.isArray(data.stateRepresentatives)
+        ? data.stateRepresentatives
+        : Object.values(data.stateRepresentatives || {}))
+    : [];
 
   return (
     <div style={{ maxWidth: 780, margin: "2rem auto", fontFamily: "system-ui" }}>
@@ -43,12 +73,26 @@ export default function RepsPage() {
           onChange={(e) => setAddr(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && lookup()}
           placeholder="Enter a NH address"
-          style={{ flex: 1, padding: "12px 14px", fontSize: 18, border: "1px solid #d0d0d0", borderRadius: 10 }}
+          style={{
+            flex: 1,
+            padding: "12px 14px",
+            fontSize: 18,
+            border: "1px solid #d0d0d0",
+            borderRadius: 10,
+          }}
         />
         <button
           onClick={lookup}
           disabled={loading}
-          style={{ padding: "12px 18px", borderRadius: 12, background: "#1E63FF", color: "#fff", border: "none", fontSize: 16, opacity: loading ? 0.7 : 1 }}
+          style={{
+            padding: "12px 18px",
+            borderRadius: 12,
+            background: "#1E63FF",
+            color: "#fff",
+            border: "none",
+            fontSize: 16,
+            opacity: loading ? 0.7 : 1,
+          }}
         >
           {loading ? "Loading…" : "Search"}
         </button>
@@ -63,59 +107,91 @@ export default function RepsPage() {
       {data && (
         <div style={{ marginTop: 16 }}>
           <div style={{ color: "#666" }}>{data.formattedAddress}</div>
-          <div style={{ color: "#666", marginBottom: 12 }}>
+          <div style={{ color: "#666", marginBottom: 6 }}>
             Base district: {data.geographies?.sldl?.name || "—"}
           </div>
 
-          {Array.isArray(data.stateRepresentatives) &&
-            data.stateRepresentatives.map((r) => {
-              const votes = toVotes((r as any).votes ?? (r as any).key_votes ?? (r as any).vote_map)
-                .filter((v) => v.bill && String(v.vote ?? "").trim().length > 0);
+          {/* Debug: prove what we got */}
+          <div style={{ fontSize: 13, color: "#444", marginBottom: 12 }}>
+            Reps found: <b>{reps.length}</b>
+            {reps.length ? ` — ${reps.map((r) => `${r.name} (${r.district})`).join(", ")}` : ""}
+          </div>
 
-              return (
-                <div key={r.id || r.name} style={{ border: "1px solid #e5e5e5", borderRadius: 14, padding: 16, marginTop: 16 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <div>
-                      <div style={{ fontSize: 22, fontWeight: 700 }}>{r.name}</div>
-                      <div style={{ color: "#555" }}>{r.district}</div>
-                    </div>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      {r.party && (
-                        <span style={{ border: "1px solid #c7d7ff", color: "#1E63FF", padding: "4px 10px", borderRadius: 999, fontSize: 13 }}>
-                          {r.party}
-                        </span>
-                      )}
-                    </div>
+          {reps.map((r) => {
+            const votes = toVotes((r as any).votes ?? (r as any).key_votes ?? (r as any).vote_map)
+              .filter((v) => v.bill && String(v.vote ?? "").trim().length > 0);
+
+            return (
+              <div
+                key={`${r.id || r.name}-${r.district || ""}`}
+                style={{ border: "1px solid #e5e5e5", borderRadius: 14, padding: 16, marginTop: 16 }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <div>
+                    <div style={{ fontSize: 22, fontWeight: 700 }}>{r.name}</div>
+                    <div style={{ color: "#555" }}>{r.district}</div>
                   </div>
-
-                  {r.email && (
-                    <div style={{ marginTop: 10 }}>
-                      <a href={`mailto:${r.email}`} style={{ border: "1px solid #ddd", borderRadius: 999, padding: "6px 12px", textDecoration: "none", color: "#222" }}>
-                        {r.email}
-                      </a>
-                    </div>
-                  )}
-
-                  <div style={{ marginTop: 12 }}>
-                    <b>Key votes ({votes.length})</b>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
-                      {votes.length ? (
-                        votes.slice(0, 24).map((v, i) => (
-                          <span key={`${v.bill}-${i}`} style={{ border: "1px solid #ccc", borderRadius: 999, padding: "4px 10px", fontSize: 13 }}>
-                            {v.bill}: {v.vote}
-                          </span>
-                        ))
-                      ) : (
-                        <i>No key votes found.</i>
-                      )}
-                    </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    {r.party && (
+                      <span
+                        style={{
+                          border: "1px solid #c7d7ff",
+                          color: "#1E63FF",
+                          padding: "4px 10px",
+                          borderRadius: 999,
+                          fontSize: 13,
+                        }}
+                      >
+                        {r.party}
+                      </span>
+                    )}
                   </div>
                 </div>
-              );
-            })}
+
+                {r.email && (
+                  <div style={{ marginTop: 10 }}>
+                    <a
+                      href={`mailto:${r.email}`}
+                      style={{
+                        border: "1px solid #ddd",
+                        borderRadius: 999,
+                        padding: "6px 12px",
+                        textDecoration: "none",
+                        color: "#222",
+                      }}
+                    >
+                      {r.email}
+                    </a>
+                  </div>
+                )}
+
+                <div style={{ marginTop: 12 }}>
+                  <b>Key votes ({votes.length})</b>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
+                    {votes.length ? (
+                      votes.slice(0, 24).map((v, i) => (
+                        <span
+                          key={`${v.bill}-${i}`}
+                          style={{
+                            border: "1px solid #ccc",
+                            borderRadius: 999,
+                            padding: "4px 10px",
+                            fontSize: 13,
+                          }}
+                        >
+                          {v.bill}: {v.vote}
+                        </span>
+                      ))
+                    ) : (
+                      <i>No key votes found.</i>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
-
