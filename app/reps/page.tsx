@@ -1,165 +1,379 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-"use client";
-import { useState } from "react";
+'use client'
 
-type Vote = { bill: string; vote: string };
-type RawVoteMap = Record<string, string | number | null | undefined>;
+import React, { useEffect, useMemo, useState } from 'react'
+
+// === Types matching current backend ===
+// Backend returns /api/lookup-with-votes with reps and a votes payload
+// that may be an object keyed by person_id OR an array of rows.
+
 type Rep = {
-  id?: string;
-  name: string;
-  party?: string;
-  district?: string;
-  email?: string;
-  votes?: Vote[] | RawVoteMap;
-};
-type Data = {
-  formattedAddress?: string;
-  geographies?: { sldl?: { name?: string } };
-  stateRepresentatives: Rep[] | Record<string, Rep>;
-};
-
-function toVotes(raw: any): Vote[] {
-  if (!raw) return [];
-  if (Array.isArray(raw)) return raw as Vote[];
-  if (typeof raw === "object") {
-    return Object.entries(raw as RawVoteMap).map(([bill, vote]) => ({
-      bill,
-      vote: String(vote ?? "").trim(),
-    }));
-  }
-  return [];
+  openstates_person_id: string
+  name: string
+  party?: string
+  district?: string
+  email?: string | null
+  phone?: string | null
+  links?: Array<{ url: string; note?: string }>
 }
 
-export default function RepsPage() {
-  const [addr, setAddr] = useState("667 NH RT 120, Cornish, NH");
-  const [data, setData] = useState<Data | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+type LookupResponse = {
+  address?: string
+  geographies?: any
+  stateRepresentatives: Rep[]
+  votes?: any
+}
 
-  async function lookup() {
-    setLoading(true); setError(null); setData(null);
+type VotesByPerson = Record<string, Record<string, string | null | undefined>>
+
+type Decision = 'FOR' | 'AGAINST' | "DIDN'T SHOW UP"
+
+// === Config ===
+// Issue → ordered bill columns (most representative first) and, optionally, pro-vote mapping per bill.
+// If a bill column listed here does NOT exist in the CSV, we gracefully skip it.
+// If you omit pro mapping for a bill, 'Y/YES/Aye' is treated as FOR the issue by default.
+
+const ISSUE_MAP: {
+  key: string
+  label: string
+  columns: string[]
+  proVote?: Record<string, 'Y' | 'N'>
+}[] = [
+  // EXAMPLES — replace column names with real CSV headers from /debug/votes-preview
+  // {
+  //   key: 'repro',
+  //   label: 'Reproductive Freedom',
+  //   columns: ['VOTE_HB1609_2025', 'VOTE_SB123_2025'],
+  //   proVote: { VOTE_HB1609_2025: 'Y', VOTE_SB123_2025: 'N' }
+  // },
+  // {
+  //   key: 'schools',
+  //   label: 'Public Schools',
+  //   columns: ['VOTE_HB200_2025']
+  // }
+]
+
+// Default example address — NOT a residence
+const DEFAULT_ADDRESS = '25 Capitol St, Concord, NH 03301'
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
+
+// Robust truth-table for vote strings
+const FOR_VALUES = new Set(['y', 'yes', 'aye', 'for'])
+const AGAINST_VALUES = new Set(['n', 'no', 'nay', 'against'])
+const ABSENT_VALUES = new Set(['nv', 'na', 'x', 'excused', 'absent', 'did not vote', 'not voting', 'didn\'t vote', 'present', 'p', 'abstain'])
+
+function normalizeVoteCell(raw: unknown): Decision | null {
+  if (raw == null) return null
+  const v = String(raw).trim().toLowerCase()
+  if (!v) return null
+  if (FOR_VALUES.has(v)) return 'FOR'
+  if (AGAINST_VALUES.has(v)) return 'AGAINST'
+  if (ABSENT_VALUES.has(v)) return "DIDN'T SHOW UP"
+  // Common single-letter and CSV quirks
+  if (v === 'y') return 'FOR'
+  if (v === 'n') return 'AGAINST'
+  return null // unknown encoding → treat as no-record; caller will map to DIDN'T SHOW UP
+}
+
+function labelFromColumn(col: string): string {
+  // Try to extract HB/SB and year: VOTE_HB123_2025 → HB123 (2025)
+  const m = col.match(/(?:VOTE_)?((?:HB|SB|HR|HCR|SCR)\s?\d{1,4})(?:[_\-\s]?(\d{4}))?/i)
+  if (m) {
+    const bill = m[1].toUpperCase().replace(/\s+/g, '')
+    const year = m[2]
+    return year ? `${bill} (${year})` : bill
+  }
+  return col
+}
+
+function normalizeVotesPayload(votes: any): VotesByPerson {
+  if (!votes) return {}
+  // Case 1: object keyed by person id
+  if (!Array.isArray(votes) && typeof votes === 'object') {
+    return votes as VotesByPerson
+  }
+  // Case 2: array of rows
+  if (Array.isArray(votes)) {
+    const out: VotesByPerson = {}
+    for (const row of votes) {
+      const id = row.openstates_person_id || row.person_id || row.id
+      if (!id) continue
+      const copy: Record<string, string> = {}
+      for (const [k, val] of Object.entries(row)) {
+        if (k === 'openstates_person_id' || k === 'name' || k === 'district') continue
+        copy[k] = String(val ?? '')
+      }
+      out[id] = copy
+    }
+    return out
+  }
+  return {}
+}
+
+function availableVoteColumns(votesByPerson: VotesByPerson): string[] {
+  // Union of keys across people, excluding id/name/district
+  const cols = new Set<string>()
+  Object.values(votesByPerson).forEach((r) => {
+    Object.keys(r).forEach((k) => {
+      if (k === 'openstates_person_id' || k === 'name' || k === 'district') return
+      cols.add(k)
+    })
+  })
+  return Array.from(cols).sort()
+}
+
+function decideForIssue(
+  rep: Rep,
+  votesByPerson: VotesByPerson,
+  issueColumns: string[],
+  proVoteMap?: Record<string, 'Y' | 'N'>
+): { decision: Decision; usedColumn?: string; raw?: string | null } {
+  const pv = votesByPerson[rep.openstates_person_id] || {}
+  // Use the first listed column that exists for this person
+  for (const col of issueColumns) {
+    if (!(col in pv)) continue
+    const raw = pv[col]
+    const norm = normalizeVoteCell(raw)
+    if (norm === null) return { decision: "DIDN'T SHOW UP", usedColumn: col, raw }
+    // If we have a pro mapping, reinterpret FOR/AGAINST relative to the issue
+    if (proVoteMap && proVoteMap[col]) {
+      const pro = proVoteMap[col]
+      if (norm === 'FOR' && pro === 'Y') return { decision: 'FOR', usedColumn: col, raw }
+      if (norm === 'AGAINST' && pro === 'N') return { decision: 'FOR', usedColumn: col, raw }
+      return { decision: 'AGAINST', usedColumn: col, raw }
+    }
+    // Default: treat FOR vote as FOR the issue
+    return { decision: norm, usedColumn: col, raw }
+  }
+  // No listed bill found for this person → classify as didn't show up for this issue
+  return { decision: "DIDN'T SHOW UP" }
+}
+
+export default function Page() {
+  const [address, setAddress] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [data, setData] = useState<LookupResponse | null>(null)
+  const [activeRepId, setActiveRepId] = useState<string | null>(null)
+  const [activeIssueKey, setActiveIssueKey] = useState<string | null>(null)
+
+  useEffect(() => {
+    // Pre-fill with a safe, public address but do NOT auto-fetch
+    setAddress(DEFAULT_ADDRESS)
+  }, [])
+
+  const reps: Rep[] = useMemo(() => data?.stateRepresentatives || [], [data])
+
+  const votesByPerson = useMemo(() => normalizeVotesPayload(data?.votes), [data])
+  const voteColumns = useMemo(() => availableVoteColumns(votesByPerson), [votesByPerson])
+
+  // Compute which issues are actually usable with available columns
+  const issues = useMemo(() => {
+    return ISSUE_MAP.map((i) => ({
+      ...i,
+      usableColumns: i.columns.filter((c) => voteColumns.includes(c))
+    })).filter((i) => i.usableColumns.length > 0)
+  }, [voteColumns])
+
+  useEffect(() => {
+    if (!activeRepId && reps.length) setActiveRepId(reps[0].openstates_person_id)
+  }, [reps, activeRepId])
+
+  useEffect(() => {
+    if (!activeIssueKey && issues.length) setActiveIssueKey(issues[0].key)
+  }, [issues, activeIssueKey])
+
+  async function handleFind() {
+    if (!API_BASE) {
+      setError('NEXT_PUBLIC_API_BASE is not set')
+      return
+    }
+    setLoading(true)
+    setError(null)
     try {
-      const base = (process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:5000").replace(/\/+$/,'');
-      const url  = `${base}/api/lookup-with-votes?address=${encodeURIComponent(addr)}&refreshVotes=1&ts=${Date.now()}`;
-      const res  = await fetch(url, { cache: "no-store" });
-      const j    = await res.json();
-      if (!res.ok || j?.success === false) throw new Error(j?.error?.message || `HTTP ${res.status}`);
-      setData(j.data as Data);
-    } catch (e:any) { setError(e.message || "Failed to fetch"); }
-    finally { setLoading(false); }
+      const url = new URL(API_BASE + '/api/lookup-with-votes')
+      url.searchParams.set('address', address)
+      url.searchParams.set('refreshVotes', '1')
+      url.searchParams.set('ts', String(Date.now()))
+      const res = await fetch(url.toString(), { cache: 'no-store' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const j: LookupResponse = await res.json()
+      setData(j)
+      if (j.stateRepresentatives?.length) {
+        setActiveRepId(j.stateRepresentatives[0].openstates_person_id)
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Fetch failed')
+    } finally {
+      setLoading(false)
+    }
   }
 
-  const reps: Rep[] = data
-    ? (Array.isArray(data.stateRepresentatives)
-        ? data.stateRepresentatives
-        : Object.values(data.stateRepresentatives || {}))
-    : [];
+  const activeRep: Rep | null = useMemo(() => reps.find((r) => r.openstates_person_id === activeRepId) || null, [reps, activeRepId])
+
+  const activeIssue = useMemo(() => issues.find((i) => i.key === activeIssueKey) || null, [issues, activeIssueKey])
+
+  // Fallback: if no issues configured/usable, expose a Bill Picker from whatever columns are present
+  const billFallbackColumns = useMemo(() => {
+    if (issues.length > 0) return [] as string[]
+    return voteColumns
+      .filter((c) => !['openstates_person_id', 'name', 'district'].includes(c))
+      .slice(0, 30) // keep it tidy
+  }, [issues, voteColumns])
+
+  const [activeBillCol, setActiveBillCol] = useState<string | null>(null)
+  useEffect(() => {
+    if (!activeBillCol && billFallbackColumns.length) setActiveBillCol(billFallbackColumns[0])
+  }, [billFallbackColumns, activeBillCol])
+
+  function decideForBill(rep: Rep, col: string | null): { decision: Decision; usedColumn?: string; raw?: string | null } {
+    if (!col) return { decision: "DIDN'T SHOW UP" }
+    const pv = votesByPerson[rep.openstates_person_id] || {}
+    const raw = pv[col]
+    const norm = normalizeVoteCell(raw)
+    if (norm === null) return { decision: "DIDN'T SHOW UP", usedColumn: col, raw }
+    return { decision: norm, usedColumn: col, raw }
+  }
+
+  const verdict = useMemo(() => {
+    if (!activeRep) return null
+    if (activeIssue) {
+      return decideForIssue(activeRep, votesByPerson, activeIssue.usableColumns, activeIssue.proVote)
+    }
+    if (activeBillCol) {
+      return decideForBill(activeRep, activeBillCol)
+    }
+    return null
+  }, [activeRep, votesByPerson, activeIssue, activeBillCol])
 
   return (
-    <div className="wrap">
-      <h1 className="h1">NH Rep Finder</h1>
+    <div className="mx-auto max-w-3xl p-4 space-y-4">
+      <h1 className="text-2xl font-semibold">Find Your NH House Rep</h1>
 
-      <div className="bar">
+      {/* Address Search */}
+      <div className="flex gap-2">
         <input
-          className="inp"
-          value={addr}
-          onChange={(e)=>setAddr(e.target.value)}
-          onKeyDown={(e)=>e.key==="Enter" && lookup()}
-          placeholder="Enter a NH address"
+          aria-label="Enter your address"
+          value={address}
+          onChange={(e) => setAddress(e.target.value)}
+          className="flex-1 border rounded-lg px-3 py-2"
+          placeholder="Enter your address"
         />
-        <button className="btn" onClick={lookup} disabled={loading}>
-          {loading ? "Loading…" : "Search"}
+        <button
+          onClick={handleFind}
+          disabled={loading || !address.trim()}
+          className="rounded-lg px-4 py-2 border disabled:opacity-50"
+        >
+          {loading ? 'Finding…' : 'Find'}
         </button>
       </div>
 
-      <div className="hint">API base: {process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:5000"}</div>
-      {error && <pre className="err">{error}</pre>}
+      {error && (
+        <div className="text-red-700 text-sm" role="alert">{error}</div>
+      )}
 
-      {data && (
-        <div className="results">
-          <div className="meta">{data.formattedAddress}</div>
-          <div className="meta">Base district: {data.geographies?.sldl?.name || "—"}</div>
-          <div className="meta small">
-            Reps found: <b>{reps.length}</b>
-            {reps.length ? ` — ${reps.map(r => `${r.name} (${r.district})`).join(", ")}` : ""}
-          </div>
-
-          {reps.map((r) => {
-            const votes = toVotes((r as any).votes ?? (r as any).key_votes ?? (r as any).vote_map)
-              .filter((v) => v.bill && String(v.vote ?? "").trim().length > 0);
-
-            const party = (r.party || "").toLowerCase();
-            const partyStyle = party.includes("rep")
-              ? { borderColor:"#ffb3b3", color:"#a40000", background:"#ffecec" }   // red for Republicans
-              : party.includes("dem")
-              ? { borderColor:"#c7d7ff", color:"#1E63FF", background:"#eef4ff" }
-              : { borderColor:"#ddd", color:"#444", background:"#f7f7f7" };
-
-            return (
-              <div key={`${r.id || r.name}-${r.district || ""}`} className="card">
-                <div className="row">
-                  <div>
-                    <div className="name">{r.name}</div>
-                    <div className="dist">{r.district}</div>
-                  </div>
-                  <div className="tags">
-                    {r.party && <span className="chip" style={partyStyle}>{r.party}</span>}
-                  </div>
-                </div>
-
-                {r.email && (
-                  <div className="email">
-                    <a href={`mailto:${r.email}`}>{r.email}</a>
-                  </div>
-                )}
-
-                <div className="votes">
-                  <b>Key votes ({votes.length})</b>
-                  <div className="chips">
-                    {votes.length ? (
-                      votes.slice(0,24).map((v,i)=>(
-                        <span key={`${v.bill}-${i}`} className="pill">{v.bill}: {v.vote}</span>
-                      ))
-                    ) : (
-                      <i>No key votes found.</i>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+      {/* Reps Switcher */}
+      {reps.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 pt-2">
+          <span className="text-sm text-gray-600">Reps:</span>
+          {reps.map((r) => (
+            <button
+              key={r.openstates_person_id}
+              onClick={() => setActiveRepId(r.openstates_person_id)}
+              className={`px-3 py-1 rounded-full border text-sm ${
+                activeRepId === r.openstates_person_id ? 'bg-gray-900 text-white' : 'bg-white'
+              }`}
+            >
+              {r.name}{r.district ? ` (${r.district})` : ''}
+            </button>
+          ))}
         </div>
       )}
 
-      <style jsx>{`
-        .wrap { max-width:780px; margin:2rem auto; padding:0 12px; font-family:system-ui; }
-        .h1 { font-size:32px; font-weight:800; margin:0 0 12px; }
-        .bar { display:flex; gap:12px; }
-        .inp { flex:1; padding:12px 14px; font-size:18px; border:1px solid #d0d0d0; border-radius:10px; }
-        .btn { padding:12px 18px; border-radius:12px; background:#1E63FF; color:#fff; border:none; font-size:16px; }
-        .btn:disabled { opacity:.7; }
-        .hint { color:#888; font-size:12px; margin-top:8px; }
-        .err { color:crimson; margin-top:12px; white-space:pre-wrap; }
-        .results { margin-top:16px; }
-        .meta { color:#666; margin-bottom:6px; }
-        .meta.small { font-size:13px; color:#444; }
-        .card { border:1px solid #e5e5e5; border-radius:14px; padding:16px; margin-top:16px; }
-        .row { display:flex; justify-content:space-between; align-items:center; gap:12px; }
-        .name { font-size:22px; font-weight:700; }
-        .dist { color:#555; }
-        .tags { display:flex; gap:8px; align-items:center; }
-        .chip { border:1px solid #ddd; border-radius:999px; padding:4px 10px; font-size:13px; background:#f7f7f7; }
-        .email a { display:inline-block; border:1px solid #ddd; border-radius:999px; padding:6px 12px; text-decoration:none; color:#222; margin-top:10px; }
-        .votes { margin-top:12px; }
-        .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; }
-        .pill { border:1px solid #ccc; border-radius:999px; padding:4px 10px; font-size:13px; }
-        @media (max-width:640px) {
-          .bar { flex-direction:column; }
-          .btn { width:100%; }
-          .row { flex-direction:column; align-items:flex-start; }
-          .email a { width:100%; text-align:center; }
-        }
-      `}</style>
+      {/* Issue Picker or Bill Fallback */}
+      {issues.length > 0 ? (
+        <div className="space-y-2">
+          <div className="text-sm text-gray-600">Issues:</div>
+          <div className="flex flex-wrap gap-2">
+            {issues.map((i) => (
+              <button
+                key={i.key}
+                onClick={() => setActiveIssueKey(i.key)}
+                className={`px-3 py-1 rounded-full border text-sm ${
+                  activeIssueKey === i.key ? 'bg-gray-900 text-white' : 'bg-white'
+                }`}
+              >
+                {i.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : billFallbackColumns.length > 0 ? (
+        <div className="space-y-2">
+          <div className="text-sm text-gray-600">Pick a bill:</div>
+          <div className="flex flex-wrap gap-2">
+            {billFallbackColumns.map((c) => (
+              <button
+                key={c}
+                onClick={() => setActiveBillCol(c)}
+                className={`px-3 py-1 rounded-full border text-sm ${
+                  activeBillCol === c ? 'bg-gray-900 text-white' : 'bg-white'
+                }`}
+              >
+                {labelFromColumn(c)}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : data ? (
+        <div className="text-sm text-gray-600">No vote columns found in CSV.</div>
+      ) : null}
+
+      {/* Verdict Card */}
+      {activeRep && verdict && (
+        <div aria-live="polite" className="mt-2">
+          <div className="rounded-2xl border p-4 shadow-sm">
+            <div className="text-xs uppercase text-gray-500">Result</div>
+            <div className="flex items-center justify-between mt-1">
+              <div className="text-xl font-bold">
+                {verdict.decision === 'FOR' && <span>FOR ✅</span>}
+                {verdict.decision === 'AGAINST' && <span>AGAINST ✖</span>}
+                {verdict.decision === "DIDN'T SHOW UP" && <span>DIDN'T SHOW UP ︱ ?</span>}
+              </div>
+              <div className="text-sm text-gray-600">
+                {activeIssue && verdict.usedColumn && (
+                  <span>
+                    {activeIssue.label}: {labelFromColumn(verdict.usedColumn)}
+                  </span>
+                )}
+                {!activeIssue && verdict.usedColumn && (
+                  <span>{labelFromColumn(verdict.usedColumn)}</span>
+                )}
+              </div>
+            </div>
+            {verdict.usedColumn && (
+              <details className="mt-2">
+                <summary className="cursor-pointer text-sm">Why this answer</summary>
+                <div className="text-sm mt-1">
+                  <div>
+                    Bill: <strong>{labelFromColumn(verdict.usedColumn)}</strong>
+                  </div>
+                  <div>
+                    {activeRep.name}'s vote: <strong>{normalizeVoteCell(votesByPerson[activeRep.openstates_person_id]?.[verdict.usedColumn] ?? '') || "No record"}</strong>
+                  </div>
+                </div>
+              </details>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Helper note when no issues configured */}
+      {issues.length === 0 && (
+        <div className="text-xs text-gray-500">
+          Admin note: configure <code>ISSUE_MAP</code> with CSV column names from <code>/debug/votes-preview</code> to enable Issue mode. Until then, the UI falls back to per‑bill selection without mixing outcomes.
+        </div>
+      )}
     </div>
-  );
+  )
 }
