@@ -2,10 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 
-// === Types matching current backend ===
-// Backend returns /api/lookup-with-votes with reps and a votes payload
-// that may be an object keyed by person_id OR an array of rows.
-
+// ===== Types (normalized) =====
 type Rep = {
   openstates_person_id: string
   name: string
@@ -15,52 +12,35 @@ type Rep = {
   phone?: string | null
   links?: Array<{ url: string; note?: string }>
 }
-
+type RawRep = Partial<Rep> & { id?: string }
 type LookupResponse = {
   address?: string
   geographies?: any
-  stateRepresentatives: Rep[]
+  stateRepresentatives: RawRep[]
   votes?: any
 }
-
 type VotesByPerson = Record<string, Record<string, string | null | undefined>>
-
 type Decision = 'FOR' | 'AGAINST' | "DIDN'T SHOW UP"
 
-// === Config ===
-// Issue → ordered bill columns (most representative first) and, optionally, pro-vote mapping per bill.
-// If a bill column listed here does NOT exist in the CSV, we gracefully skip it.
-// If you omit pro mapping for a bill, 'Y/YES/Aye' is treated as FOR the issue by default.
-
+// ===== Config =====
+// If you leave ISSUE_MAP empty, the UI falls back to a Bill Picker (from CSV headers).
 const ISSUE_MAP: {
   key: string
   label: string
   columns: string[]
+  // If a bill is pro when the vote is "N", set proVote[col] = 'N'
   proVote?: Record<string, 'Y' | 'N'>
-}[] = [
-  // EXAMPLES — replace column names with real CSV headers from /debug/votes-preview
-  // {
-  //   key: 'repro',
-  //   label: 'Reproductive Freedom',
-  //   columns: ['VOTE_HB1609_2025', 'VOTE_SB123_2025'],
-  //   proVote: { VOTE_HB1609_2025: 'Y', VOTE_SB123_2025: 'N' }
-  // },
-  // {
-  //   key: 'schools',
-  //   label: 'Public Schools',
-  //   columns: ['VOTE_HB200_2025']
-  // }
-]
+}[] = []
 
-// Default example address — NOT a residence
 const DEFAULT_ADDRESS = '25 Capitol St, Concord, NH 03301'
-
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 
-// Robust truth-table for vote strings
+// ===== Vote normalization =====
 const FOR_VALUES = new Set(['y', 'yes', 'aye', 'for'])
 const AGAINST_VALUES = new Set(['n', 'no', 'nay', 'against'])
-const ABSENT_VALUES = new Set(['nv', 'na', 'x', 'excused', 'absent', 'did not vote', 'not voting', "didn't vote", 'present', 'p', 'abstain'])
+const ABSENT_VALUES = new Set([
+  'nv', 'na', 'x', 'excused', 'absent', 'did not vote', 'not voting', "didn't vote", 'present', 'p', 'abstain'
+])
 
 function normalizeVoteCell(raw: unknown): Decision | null {
   if (raw == null) return null
@@ -69,74 +49,89 @@ function normalizeVoteCell(raw: unknown): Decision | null {
   if (FOR_VALUES.has(v)) return 'FOR'
   if (AGAINST_VALUES.has(v)) return 'AGAINST'
   if (ABSENT_VALUES.has(v)) return "DIDN'T SHOW UP"
-  // Common single-letter and CSV quirks
   if (v === 'y') return 'FOR'
   if (v === 'n') return 'AGAINST'
-  return null // unknown encoding → treat as no-record; caller will map to DIDN'T SHOW UP
+  return null
 }
 
 function labelFromColumn(col: string): string {
-  // Try to extract HB/SB and year: VOTE_HB123_2025 → HB123 (2025)
   const m = col.match(/(?:VOTE_)?((?:HB|SB|HR|HCR|SCR)\s?\d{1,4})(?:[_\-\s]?(\d{4}))?/i)
   if (m) {
     const bill = m[1].toUpperCase().replace(/\s+/g, '')
     const year = m[2]
     return year ? `${bill} (${year})` : bill
   }
-  return col
+  return col.replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-function unwrapPayload(j: any): LookupResponse {
-  let d: any = j?.data ?? j
-  if (d && typeof d === 'object' && 'data' in d && (d as any).data && !(d as any).stateRepresentatives && (d as any).data.stateRepresentatives) {
-    d = (d as any).data
-  }
-  return d as LookupResponse
-}
-
-function extractVotesContainer(payload: any): any {
-  if (!payload) return null
-  let v = payload.votes ?? payload.key_votes ?? payload.keyVotes ?? payload?.data?.votes ?? payload?.data?.key_votes ?? payload?.data?.keyVotes
-  return v ?? null
-}
-
-function normalizeVotesFromPayload(payload: any): VotesByPerson {
-  let v: any = extractVotesContainer(payload)
-  if (!v) return {}
-  if (v && typeof v === 'object' && 'data' in v && (v as any).data != null) v = (v as any).data
-  if (v && typeof v === 'object' && 'rows' in v && Array.isArray((v as any).rows)) v = (v as any).rows
-
-  if (Array.isArray(v)) {
-    const out: VotesByPerson = {}
-    for (const row of v) {
-      const id = (row as any).openstates_person_id || (row as any).person_id || (row as any).id
-      if (!id) continue
-      const copy: Record<string, string> = {}
-      for (const [k, val] of Object.entries(row as any)) {
-        if (k === 'openstates_person_id' || k === 'name' || k === 'district') continue
-        copy[k] = String(val ?? '')
-      }
-      out[id] = copy
+// ===== CSV parsing =====
+function splitCSVLine(line: string): string[] {
+  const out: string[] = []
+  let cur = '', inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++ } else { inQuotes = false }
+      } else cur += ch
+    } else {
+      if (ch === ',') { out.push(cur); cur = '' }
+      else if (ch === '"') inQuotes = true
+      else cur += ch
     }
-    return out
   }
-
-  if (v && typeof v === 'object') {
-    return v as VotesByPerson
-  }
-  return {}
+  out.push(cur)
+  return out
 }
 
-function availableVoteColumns(votesByPerson: VotesByPerson): string[] {
-  // Union of keys across people, excluding id/name/district
-  const cols = new Set<string>()
-  Object.values(votesByPerson).forEach((r) => {
-    Object.keys(r).forEach((k) => {
-      if (k === 'openstates_person_id' || k === 'name' || k === 'district') return
-      cols.add(k)
-    })
-  })
-  return Array.from(cols).sort()
+function parseCSV(text: string): { headers: string[]; rows: Record<string, string>[] } {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n').filter(l => l.length > 0)
+  if (!lines.length) return { headers: [], rows: [] }
+  const headers = splitCSVLine(lines[0]).map(h => h.trim())
+  const rows: Record<string, string>[] = []
+  for (let i = 1; i < lines.length; i++) {
+    const parts = splitCSVLine(lines[i])
+    const row: Record<string, string> = {}
+    for (let c = 0; c < headers.length; c++) row[headers[c]] = parts[c] ?? ''
+    rows.push(row)
+  }
+  return { headers, rows }
+}
+
+async function fetchVotesCSV(): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
+  const res = await fetch(`${API_BASE}/house_key_votes.csv?ts=${Date.now()}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(`CSV HTTP ${res.status}`)
+  return parseCSV(await res.text())
+}
+
+function buildVotesMapFromCSV(rows: Record<string, string>[]): VotesByPerson {
+  const out: VotesByPerson = {}
+  for (const r of rows) {
+    const id = (r['openstates_person_id'] || r['person_id'] || r['id'] || '').trim()
+    if (!id) continue
+    const copy: Record<string, string> = {}
+    for (const [k, v] of Object.entries(r)) {
+      if (k === 'openstates_person_id' || k === 'person_id' || k === 'id' || k === 'name' || k === 'district') continue
+      copy[k] = String(v ?? '')
+    }
+    out[id] = copy
+  }
+  return out
+}
+
+function normalizeReps(list: RawRep[] | undefined | null): Rep[] {
+  if (!list) return []
+  return list
+    .map((r) => ({
+      openstates_person_id: (r as any).openstates_person_id || (r as any).person_id || (r as any).id || '',
+      name: (r as any).name || '',
+      party: (r as any).party,
+      district: (r as any).district,
+      email: (r as any).email ?? null,
+      phone: (r as any).phone ?? null,
+      links: (r as any).links || []
+    }))
+    .filter((r) => r.openstates_person_id)
 }
 
 function decideForIssue(
@@ -146,79 +141,75 @@ function decideForIssue(
   proVoteMap?: Record<string, 'Y' | 'N'>
 ): { decision: Decision; usedColumn?: string; raw?: string | null } {
   const pv = votesByPerson[rep.openstates_person_id] || {}
-  // Use the first listed column that exists for this person
   for (const col of issueColumns) {
     if (!(col in pv)) continue
     const raw = pv[col]
     const norm = normalizeVoteCell(raw)
     if (norm === null) return { decision: "DIDN'T SHOW UP", usedColumn: col, raw }
-    // If we have a pro mapping, reinterpret FOR/AGAINST relative to the issue
     if (proVoteMap && proVoteMap[col]) {
       const pro = proVoteMap[col]
       if (norm === 'FOR' && pro === 'Y') return { decision: 'FOR', usedColumn: col, raw }
       if (norm === 'AGAINST' && pro === 'N') return { decision: 'FOR', usedColumn: col, raw }
       return { decision: 'AGAINST', usedColumn: col, raw }
     }
-    // Default: treat FOR vote as FOR the issue
     return { decision: norm, usedColumn: col, raw }
   }
-  // No listed bill found for this person → classify as didn't show up for this issue
   return { decision: "DIDN'T SHOW UP" }
 }
 
+// ===== Page =====
 export default function Page() {
   const [address, setAddress] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [data, setData] = useState<LookupResponse | null>(null)
+
+  const [reps, setReps] = useState<Rep[]>([])
+  const [votesByPerson, setVotesByPerson] = useState<VotesByPerson>({})
+
   const [activeRepId, setActiveRepId] = useState<string | null>(null)
   const [activeIssueKey, setActiveIssueKey] = useState<string | null>(null)
+  const [activeBillCol, setActiveBillCol] = useState<string | null>(null)
 
-  useEffect(() => {
-    // Pre-fill with a safe, public address but do NOT auto-fetch
-    setAddress(DEFAULT_ADDRESS)
-  }, [])
+  useEffect(() => { setAddress(DEFAULT_ADDRESS) }, [])
 
-  const reps: Rep[] = useMemo(() => data?.stateRepresentatives || [], [data])
+  const voteColumns = useMemo(() => {
+    const cols = new Set<string>()
+    Object.values(votesByPerson).forEach((r) => Object.keys(r).forEach((k) => cols.add(k)))
+    ;['openstates_person_id','person_id','id','name','district'].forEach((k) => cols.delete(k))
+    return Array.from(cols).sort()
+  }, [votesByPerson])
 
-  const votesByPerson = useMemo(() => normalizeVotesFromPayload(data), [data])
-  const voteColumns = useMemo(() => availableVoteColumns(votesByPerson), [votesByPerson])
-
-  // Compute which issues are actually usable with available columns
   const issues = useMemo(() => {
-    return ISSUE_MAP.map((i) => ({
-      ...i,
-      usableColumns: i.columns.filter((c) => voteColumns.includes(c))
-    })).filter((i) => i.usableColumns.length > 0)
+    return ISSUE_MAP.map((i) => ({ ...i, usableColumns: i.columns.filter((c) => voteColumns.includes(c)) }))
+                   .filter((i) => i.usableColumns.length > 0)
   }, [voteColumns])
 
-  useEffect(() => {
-    if (!activeRepId && reps.length) setActiveRepId(reps[0].openstates_person_id)
-  }, [reps, activeRepId])
-
-  useEffect(() => {
-    if (!activeIssueKey && issues.length) setActiveIssueKey(issues[0].key)
-  }, [issues, activeIssueKey])
+  useEffect(() => { if (!activeRepId && reps.length) setActiveRepId(reps[0].openstates_person_id) }, [reps, activeRepId])
+  useEffect(() => { if (!activeIssueKey && issues.length) setActiveIssueKey(issues[0].key) }, [issues, activeIssueKey])
+  useEffect(() => { if (!activeBillCol && !issues.length && voteColumns.length) setActiveBillCol(voteColumns[0]) }, [voteColumns, issues, activeBillCol])
 
   async function handleFind() {
-    if (!API_BASE) {
-      setError('NEXT_PUBLIC_API_BASE is not set')
-      return
-    }
-    setLoading(true)
-    setError(null)
+    if (!API_BASE) { setError('NEXT_PUBLIC_API_BASE is not set'); return }
+    setLoading(true); setError(null)
     try {
-      const url = new URL(API_BASE + '/api/lookup-with-votes')
-      url.searchParams.set('address', address)
-      url.searchParams.set('refreshVotes', '1')
-      url.searchParams.set('ts', String(Date.now()))
-      const res = await fetch(url.toString(), { cache: 'no-store' })
+      // 1) reps
+      const u = new URL(API_BASE + '/api/lookup-legislators')
+      u.searchParams.set('address', address); u.searchParams.set('ts', String(Date.now()))
+      const res = await fetch(u.toString(), { cache: 'no-store' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const j: any = await res.json()
-      const payload = unwrapPayload(j)
-      setData(payload)
-      if (payload?.stateRepresentatives?.length) {
-        setActiveRepId(payload.stateRepresentatives[0].openstates_person_id)
+      const payload: LookupResponse = (j?.data ?? j) as LookupResponse
+      const norm = normalizeReps(payload?.stateRepresentatives)
+      setReps(norm)
+      if (norm.length) setActiveRepId(norm[0].openstates_person_id)
+
+      // 2) votes CSV
+      const { headers, rows } = await fetchVotesCSV()
+      const map = buildVotesMapFromCSV(rows)
+      setVotesByPerson(map)
+      if (!ISSUE_MAP.length) {
+        const billCols = headers.filter((h) => !['openstates_person_id','person_id','id','name','district'].includes(h))
+        if (billCols.length) setActiveBillCol(billCols[0])
       }
     } catch (e: any) {
       setError(e?.message || 'Fetch failed')
@@ -227,22 +218,11 @@ export default function Page() {
     }
   }
 
-  const activeRep: Rep | null = useMemo(() => reps.find((r) => r.openstates_person_id === activeRepId) || null, [reps, activeRepId])
-
+  const activeRep: Rep | null = useMemo(
+    () => reps.find((r) => r.openstates_person_id === activeRepId) || null,
+    [reps, activeRepId]
+  )
   const activeIssue = useMemo(() => issues.find((i) => i.key === activeIssueKey) || null, [issues, activeIssueKey])
-
-  // Fallback: if no issues configured/usable, expose a Bill Picker from whatever columns are present
-  const billFallbackColumns = useMemo(() => {
-    if (issues.length > 0) return [] as string[]
-    return voteColumns
-      .filter((c) => !['openstates_person_id', 'name', 'district'].includes(c))
-      .slice(0, 30) // keep it tidy
-  }, [issues, voteColumns])
-
-  const [activeBillCol, setActiveBillCol] = useState<string | null>(null)
-  useEffect(() => {
-    if (!activeBillCol && billFallbackColumns.length) setActiveBillCol(billFallbackColumns[0])
-  }, [billFallbackColumns, activeBillCol])
 
   function decideForBill(rep: Rep, col: string | null): { decision: Decision; usedColumn?: string; raw?: string | null } {
     if (!col) return { decision: "DIDN'T SHOW UP" }
@@ -255,12 +235,8 @@ export default function Page() {
 
   const verdict = useMemo(() => {
     if (!activeRep) return null
-    if (activeIssue) {
-      return decideForIssue(activeRep, votesByPerson, activeIssue.usableColumns, activeIssue.proVote)
-    }
-    if (activeBillCol) {
-      return decideForBill(activeRep, activeBillCol)
-    }
+    if (activeIssue) return decideForIssue(activeRep, votesByPerson, (activeIssue as any).usableColumns, activeIssue.proVote)
+    if (activeBillCol) return decideForBill(activeRep, activeBillCol)
     return null
   }, [activeRep, votesByPerson, activeIssue, activeBillCol])
 
@@ -286,9 +262,7 @@ export default function Page() {
         </button>
       </div>
 
-      {error && (
-        <div className="text-red-700 text-sm" role="alert">{error}</div>
-      )}
+      {error && <div className="text-red-700 text-sm" role="alert">{error}</div>}
 
       {/* Reps Switcher */}
       {reps.length > 0 && (
@@ -326,11 +300,11 @@ export default function Page() {
             ))}
           </div>
         </div>
-      ) : billFallbackColumns.length > 0 ? (
+      ) : voteColumns.length > 0 ? (
         <div className="space-y-2">
           <div className="text-sm text-gray-600">Pick a bill:</div>
           <div className="flex flex-wrap gap-2">
-            {billFallbackColumns.map((c) => (
+            {voteColumns.map((c) => (
               <button
                 key={c}
                 onClick={() => setActiveBillCol(c)}
@@ -343,9 +317,9 @@ export default function Page() {
             ))}
           </div>
         </div>
-      ) : data ? (
+      ) : (
         <div className="text-sm text-gray-600">No vote columns found in CSV.</div>
-      ) : null}
+      )}
 
       {/* Verdict Card */}
       {activeRep && verdict && (
@@ -360,9 +334,7 @@ export default function Page() {
               </div>
               <div className="text-sm text-gray-600">
                 {activeIssue && verdict.usedColumn && (
-                  <span>
-                    {activeIssue.label}: {labelFromColumn(verdict.usedColumn)}
-                  </span>
+                  <span>{activeIssue.label}: {labelFromColumn(verdict.usedColumn)}</span>
                 )}
                 {!activeIssue && verdict.usedColumn && (
                   <span>{labelFromColumn(verdict.usedColumn)}</span>
@@ -373,11 +345,10 @@ export default function Page() {
               <details className="mt-2">
                 <summary className="cursor-pointer text-sm">Why this answer</summary>
                 <div className="text-sm mt-1">
+                  <div>Bill: <strong>{labelFromColumn(verdict.usedColumn)}</strong></div>
                   <div>
-                    Bill: <strong>{labelFromColumn(verdict.usedColumn)}</strong>
-                  </div>
-                  <div>
-                    {activeRep.name}'s vote: <strong>{normalizeVoteCell(votesByPerson[activeRep.openstates_person_id]?.[verdict.usedColumn] ?? '') || "No record"}</strong>
+                    {activeRep.name}'s vote:{' '}
+                    <strong>{normalizeVoteCell(votesByPerson[activeRep.openstates_person_id]?.[verdict.usedColumn] ?? '') || 'No record'}</strong>
                   </div>
                 </div>
               </details>
@@ -386,13 +357,12 @@ export default function Page() {
         </div>
       )}
 
-      {/* Helper note when no issues configured */}
+      {/* Admin hint when no issues configured */}
       {issues.length === 0 && (
         <div className="text-xs text-gray-500">
-          Admin note: configure <code>ISSUE_MAP</code> with CSV column names from <code>/debug/votes-preview</code> to enable Issue mode. Until then, the UI falls back to per‑bill selection without mixing outcomes.
+          Admin note: configure <code>ISSUE_MAP</code> with CSV column names from <code>/debug/votes-preview</code> to enable Issue mode. Until then, the UI falls back to per-bill selection.
         </div>
       )}
     </div>
   )
 }
-
