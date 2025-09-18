@@ -60,7 +60,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 // Robust truth-table for vote strings
 const FOR_VALUES = new Set(['y', 'yes', 'aye', 'for'])
 const AGAINST_VALUES = new Set(['n', 'no', 'nay', 'against'])
-const ABSENT_VALUES = new Set(['nv', 'na', 'x', 'excused', 'absent', 'did not vote', 'not voting', 'didn\'t vote', 'present', 'p', 'abstain'])
+const ABSENT_VALUES = new Set(['nv', 'na', 'x', 'excused', 'absent', 'did not vote', 'not voting', "didn't vote", 'present', 'p', 'abstain'])
 
 function normalizeVoteCell(raw: unknown): Decision | null {
   if (raw == null) return null
@@ -86,14 +86,26 @@ function labelFromColumn(col: string): string {
   return col
 }
 
-function normalizeVotesPayload(votes: any): VotesByPerson {
-  let v: any = votes
+function unwrapPayload(j: any): LookupResponse {
+  let d: any = j?.data ?? j
+  if (d && typeof d === 'object' && 'data' in d && (d as any).data && !(d as any).stateRepresentatives && (d as any).data.stateRepresentatives) {
+    d = (d as any).data
+  }
+  return d as LookupResponse
+}
+
+function extractVotesContainer(payload: any): any {
+  if (!payload) return null
+  let v = payload.votes ?? payload.key_votes ?? payload.keyVotes ?? payload?.data?.votes ?? payload?.data?.key_votes ?? payload?.data?.keyVotes
+  return v ?? null
+}
+
+function normalizeVotesFromPayload(payload: any): VotesByPerson {
+  let v: any = extractVotesContainer(payload)
   if (!v) return {}
-  // Unwrap common wrappers: { data: [...] } or { rows: [...] }
   if (v && typeof v === 'object' && 'data' in v && (v as any).data != null) v = (v as any).data
   if (v && typeof v === 'object' && 'rows' in v && Array.isArray((v as any).rows)) v = (v as any).rows
 
-  // Case 1: array of rows
   if (Array.isArray(v)) {
     const out: VotesByPerson = {}
     for (const row of v) {
@@ -109,7 +121,6 @@ function normalizeVotesPayload(votes: any): VotesByPerson {
     return out
   }
 
-  // Case 2: object keyed by person id
   if (v && typeof v === 'object') {
     return v as VotesByPerson
   }
@@ -170,7 +181,7 @@ export default function Page() {
 
   const reps: Rep[] = useMemo(() => data?.stateRepresentatives || [], [data])
 
-  const votesByPerson = useMemo(() => normalizeVotesPayload(data?.votes), [data])
+  const votesByPerson = useMemo(() => normalizeVotesFromPayload(data), [data])
   const voteColumns = useMemo(() => availableVoteColumns(votesByPerson), [votesByPerson])
 
   // Compute which issues are actually usable with available columns
@@ -204,11 +215,9 @@ export default function Page() {
       const res = await fetch(url.toString(), { cache: 'no-store' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const j: any = await res.json()
-      const payload: LookupResponse = (j && typeof j === 'object' && 'data' in j && j.data)
-        ? (j.data as LookupResponse)
-        : (j as LookupResponse)
+      const payload = unwrapPayload(j)
       setData(payload)
-      if (payload.stateRepresentatives?.length) {
+      if (payload?.stateRepresentatives?.length) {
         setActiveRepId(payload.stateRepresentatives[0].openstates_person_id)
       }
     } catch (e: any) {
@@ -386,3 +395,4 @@ export default function Page() {
     </div>
   )
 }
+
