@@ -87,25 +87,31 @@ function labelFromColumn(col: string): string {
 }
 
 function normalizeVotesPayload(votes: any): VotesByPerson {
-  if (!votes) return {}
-  // Case 1: object keyed by person id
-  if (!Array.isArray(votes) && typeof votes === 'object') {
-    return votes as VotesByPerson
-  }
-  // Case 2: array of rows
-  if (Array.isArray(votes)) {
+  let v: any = votes
+  if (!v) return {}
+  // Unwrap common wrappers: { data: [...] } or { rows: [...] }
+  if (v && typeof v === 'object' && 'data' in v && (v as any).data != null) v = (v as any).data
+  if (v && typeof v === 'object' && 'rows' in v && Array.isArray((v as any).rows)) v = (v as any).rows
+
+  // Case 1: array of rows
+  if (Array.isArray(v)) {
     const out: VotesByPerson = {}
-    for (const row of votes) {
-      const id = row.openstates_person_id || row.person_id || row.id
+    for (const row of v) {
+      const id = (row as any).openstates_person_id || (row as any).person_id || (row as any).id
       if (!id) continue
       const copy: Record<string, string> = {}
-      for (const [k, val] of Object.entries(row)) {
+      for (const [k, val] of Object.entries(row as any)) {
         if (k === 'openstates_person_id' || k === 'name' || k === 'district') continue
         copy[k] = String(val ?? '')
       }
       out[id] = copy
     }
     return out
+  }
+
+  // Case 2: object keyed by person id
+  if (v && typeof v === 'object') {
+    return v as VotesByPerson
   }
   return {}
 }
@@ -197,10 +203,13 @@ export default function Page() {
       url.searchParams.set('ts', String(Date.now()))
       const res = await fetch(url.toString(), { cache: 'no-store' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const j: LookupResponse = await res.json()
-      setData(j)
-      if (j.stateRepresentatives?.length) {
-        setActiveRepId(j.stateRepresentatives[0].openstates_person_id)
+      const j: any = await res.json()
+      const payload: LookupResponse = (j && typeof j === 'object' && 'data' in j && j.data)
+        ? (j.data as LookupResponse)
+        : (j as LookupResponse)
+      setData(payload)
+      if (payload.stateRepresentatives?.length) {
+        setActiveRepId(payload.stateRepresentatives[0].openstates_person_id)
       }
     } catch (e: any) {
       setError(e?.message || 'Fetch failed')
