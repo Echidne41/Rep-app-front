@@ -12,25 +12,32 @@ type Rep = {
   phone?: string | null
   links?: Array<{ url: string; note?: string }>
 }
+
 type RawRep = Partial<Rep> & { id?: string }
+
 type LookupResponse = {
   address?: string
   geographies?: any
   stateRepresentatives: RawRep[]
-  votes?: any
 }
+
 type VotesByPerson = Record<string, Record<string, string | null | undefined>>
-type Decision = 'FOR' | 'AGAINST' | "DIDN'T SHOW UP"
+
+type Decision = 'FOR' | 'AGAINST' | "DIDN'T VOTE"
 
 // ===== Config =====
 // If you leave ISSUE_MAP empty, the UI falls back to a Bill Picker (from CSV headers).
-const ISSUE_MAP: {
+export const ISSUE_MAP: {
   key: string
   label: string
   columns: string[]
   // If a bill is pro when the vote is "N", set proVote[col] = 'N'
   proVote?: Record<string, 'Y' | 'N'>
-}[] = []
+}[] = [
+  // EXAMPLE — replace with real CSV column headers from /debug/votes-preview
+  // { key: 'schools', label: 'Public School Funding', columns: ['HB210_2025','HB583_2025'] },
+  // { key: 'repro',   label: 'Reproductive Freedom', columns: ['HB1_2025'], proVote: { HB1_2025: 'N' } },
+]
 
 const DEFAULT_ADDRESS = '25 Capitol St, Concord, NH 03301'
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
@@ -39,7 +46,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 const FOR_VALUES = new Set(['y', 'yes', 'aye', 'for'])
 const AGAINST_VALUES = new Set(['n', 'no', 'nay', 'against'])
 const ABSENT_VALUES = new Set([
-  'nv', 'na', 'x', 'excused', 'absent', 'did not vote', 'not voting', "didn't vote", 'present', 'p', 'abstain'
+  'nv','na','x','excused','absent','did not vote','didn\'t vote','didn’t vote','not voting','no vote','present','p','abstain'
 ])
 
 function normalizeVoteCell(raw: unknown): Decision | null {
@@ -48,7 +55,7 @@ function normalizeVoteCell(raw: unknown): Decision | null {
   if (!v) return null
   if (FOR_VALUES.has(v)) return 'FOR'
   if (AGAINST_VALUES.has(v)) return 'AGAINST'
-  if (ABSENT_VALUES.has(v)) return "DIDN'T SHOW UP"
+  if (ABSENT_VALUES.has(v)) return "DIDN'T VOTE"
   if (v === 'y') return 'FOR'
   if (v === 'n') return 'AGAINST'
   return null
@@ -145,7 +152,7 @@ function decideForIssue(
     if (!(col in pv)) continue
     const raw = pv[col]
     const norm = normalizeVoteCell(raw)
-    if (norm === null) return { decision: "DIDN'T SHOW UP", usedColumn: col, raw }
+    if (norm === null) return { decision: "DIDN'T VOTE", usedColumn: col, raw }
     if (proVoteMap && proVoteMap[col]) {
       const pro = proVoteMap[col]
       if (norm === 'FOR' && pro === 'Y') return { decision: 'FOR', usedColumn: col, raw }
@@ -154,10 +161,9 @@ function decideForIssue(
     }
     return { decision: norm, usedColumn: col, raw }
   }
-  return { decision: "DIDN'T SHOW UP" }
+  return { decision: "DIDN'T VOTE" }
 }
 
-// ===== Page =====
 export default function Page() {
   const [address, setAddress] = useState('')
   const [loading, setLoading] = useState(false)
@@ -166,7 +172,6 @@ export default function Page() {
   const [reps, setReps] = useState<Rep[]>([])
   const [votesByPerson, setVotesByPerson] = useState<VotesByPerson>({})
 
-  const [activeRepId, setActiveRepId] = useState<string | null>(null)
   const [activeIssueKey, setActiveIssueKey] = useState<string | null>(null)
   const [activeBillCol, setActiveBillCol] = useState<string | null>(null)
 
@@ -184,7 +189,6 @@ export default function Page() {
                    .filter((i) => i.usableColumns.length > 0)
   }, [voteColumns])
 
-  useEffect(() => { if (!activeRepId && reps.length) setActiveRepId(reps[0].openstates_person_id) }, [reps, activeRepId])
   useEffect(() => { if (!activeIssueKey && issues.length) setActiveIssueKey(issues[0].key) }, [issues, activeIssueKey])
   useEffect(() => { if (!activeBillCol && !issues.length && voteColumns.length) setActiveBillCol(voteColumns[0]) }, [voteColumns, issues, activeBillCol])
 
@@ -201,7 +205,6 @@ export default function Page() {
       const payload: LookupResponse = (j?.data ?? j) as LookupResponse
       const norm = normalizeReps(payload?.stateRepresentatives)
       setReps(norm)
-      if (norm.length) setActiveRepId(norm[0].openstates_person_id)
 
       // 2) votes CSV
       const { headers, rows } = await fetchVotesCSV()
@@ -218,27 +221,23 @@ export default function Page() {
     }
   }
 
-  const activeRep: Rep | null = useMemo(
-    () => reps.find((r) => r.openstates_person_id === activeRepId) || null,
-    [reps, activeRepId]
-  )
-  const activeIssue = useMemo(() => issues.find((i) => i.key === activeIssueKey) || null, [issues, activeIssueKey])
-
   function decideForBill(rep: Rep, col: string | null): { decision: Decision; usedColumn?: string; raw?: string | null } {
-    if (!col) return { decision: "DIDN'T SHOW UP" }
+    if (!col) return { decision: "DIDN'T VOTE" }
     const pv = votesByPerson[rep.openstates_person_id] || {}
     const raw = pv[col]
     const norm = normalizeVoteCell(raw)
-    if (norm === null) return { decision: "DIDN'T SHOW UP", usedColumn: col, raw }
+    if (norm === null) return { decision: "DIDN'T VOTE", usedColumn: col, raw }
     return { decision: norm, usedColumn: col, raw }
   }
 
-  const verdict = useMemo(() => {
-    if (!activeRep) return null
-    if (activeIssue) return decideForIssue(activeRep, votesByPerson, (activeIssue as any).usableColumns, activeIssue.proVote)
-    if (activeBillCol) return decideForBill(activeRep, activeBillCol)
+  function verdictFor(rep: Rep) {
+    if (activeIssueKey) {
+      const issue = issues.find((i) => i.key === activeIssueKey)
+      if (issue) return decideForIssue(rep, votesByPerson, (issue as any).usableColumns, issue.proVote)
+    }
+    if (activeBillCol) return decideForBill(rep, activeBillCol)
     return null
-  }, [activeRep, votesByPerson, activeIssue, activeBillCol])
+  }
 
   return (
     <div className="mx-auto max-w-3xl p-4 space-y-4">
@@ -264,24 +263,6 @@ export default function Page() {
 
       {error && <div className="text-red-700 text-sm" role="alert">{error}</div>}
 
-      {/* Reps Switcher */}
-      {reps.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 pt-2">
-          <span className="text-sm text-gray-600">Reps:</span>
-          {reps.map((r) => (
-            <button
-              key={r.openstates_person_id}
-              onClick={() => setActiveRepId(r.openstates_person_id)}
-              className={`px-3 py-1 rounded-full border text-sm ${
-                activeRepId === r.openstates_person_id ? 'bg-gray-900 text-white' : 'bg-white'
-              }`}
-            >
-              {r.name}{r.district ? ` (${r.district})` : ''}
-            </button>
-          ))}
-        </div>
-      )}
-
       {/* Issue Picker or Bill Fallback */}
       {issues.length > 0 ? (
         <div className="space-y-2">
@@ -303,12 +284,12 @@ export default function Page() {
       ) : voteColumns.length > 0 ? (
         <div className="space-y-2">
           <div className="text-sm text-gray-600">Pick a bill:</div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2 overflow-x-auto">
             {voteColumns.map((c) => (
               <button
                 key={c}
                 onClick={() => setActiveBillCol(c)}
-                className={`px-3 py-1 rounded-full border text-sm ${
+                className={`px-3 py-1 rounded-full border text-sm whitespace-nowrap ${
                   activeBillCol === c ? 'bg-gray-900 text-white' : 'bg-white'
                 }`}
               >
@@ -317,50 +298,43 @@ export default function Page() {
             ))}
           </div>
         </div>
-      ) : (
-        <div className="text-sm text-gray-600">No vote columns found in CSV.</div>
-      )}
+      ) : null}
 
-      {/* Verdict Card */}
-      {activeRep && verdict && (
-        <div aria-live="polite" className="mt-2">
-          <div className="rounded-2xl border p-4 shadow-sm">
-            <div className="text-xs uppercase text-gray-500">Result</div>
-            <div className="flex items-center justify-between mt-1">
-              <div className="text-xl font-bold">
-                {verdict.decision === 'FOR' && <span>FOR ✅</span>}
-                {verdict.decision === 'AGAINST' && <span>AGAINST ✖</span>}
-                {verdict.decision === "DIDN'T SHOW UP" && <span>DIDN'T SHOW UP ︱ ?</span>}
-              </div>
-              <div className="text-sm text-gray-600">
-                {activeIssue && verdict.usedColumn && (
-                  <span>{activeIssue.label}: {labelFromColumn(verdict.usedColumn)}</span>
-                )}
-                {!activeIssue && verdict.usedColumn && (
-                  <span>{labelFromColumn(verdict.usedColumn)}</span>
-                )}
-              </div>
-            </div>
-            {verdict.usedColumn && (
-              <details className="mt-2">
-                <summary className="cursor-pointer text-sm">Why this answer</summary>
-                <div className="text-sm mt-1">
-                  <div>Bill: <strong>{labelFromColumn(verdict.usedColumn)}</strong></div>
-                  <div>
-                    {activeRep.name}'s vote:{' '}
-                    <strong>{normalizeVoteCell(votesByPerson[activeRep.openstates_person_id]?.[verdict.usedColumn] ?? '') || 'No record'}</strong>
-                  </div>
+      {/* Verdicts for ALL reps */}
+      {reps.length > 0 && (
+        <div className="grid gap-3 md:grid-cols-2">
+          {reps.map((rep) => {
+            const v = verdictFor(rep)
+            return (
+              <div key={rep.openstates_person_id} className="rounded-2xl border p-4 shadow-sm">
+                <div className="text-sm text-gray-700 font-medium">{rep.name}{rep.district ? ` (${rep.district})` : ''}</div>
+                <div className="mt-2 text-xl font-bold">
+                  {v?.decision === 'FOR' && <span>FOR ✅</span>}
+                  {v?.decision === 'AGAINST' && <span>AGAINST ✖</span>}
+                  {v?.decision === "DIDN'T VOTE" && <span>DIDN'T VOTE ︱ ?</span>}
+                  {!v && <span className="text-gray-500">Select an issue or bill</span>}
                 </div>
-              </details>
-            )}
-          </div>
+                {v?.usedColumn && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-sm">Why this answer</summary>
+                    <div className="text-sm mt-1">
+                      <div>Bill: <strong>{labelFromColumn(v.usedColumn)}</strong></div>
+                      <div>
+                        {rep.name}'s vote: <strong>{normalizeVoteCell(votesByPerson[rep.openstates_person_id]?.[v.usedColumn] ?? '') || 'No record'}</strong>
+                      </div>
+                    </div>
+                  </details>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 
       {/* Admin hint when no issues configured */}
-      {issues.length === 0 && (
+      {issues.length === 0 && voteColumns.length === 0 && (
         <div className="text-xs text-gray-500">
-          Admin note: configure <code>ISSUE_MAP</code> with CSV column names from <code>/debug/votes-preview</code> to enable Issue mode. Until then, the UI falls back to per-bill selection.
+          No vote columns detected. Confirm <code>/house_key_votes.csv</code> has headers and rows.
         </div>
       )}
     </div>
