@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 
-// ===== Types (normalized) =====
+// ===== Types =====
 type Rep = {
   openstates_person_id: string
   name: string
@@ -12,62 +12,59 @@ type Rep = {
   phone?: string | null
   links?: Array<{ url: string; note?: string }>
 }
-
 type RawRep = Partial<Rep> & { id?: string }
-
 type LookupResponse = { address?: string; geographies?: any; stateRepresentatives: RawRep[] }
-
 type VotesByPerson = Record<string, Record<string, string | null | undefined>>
-
 type Decision = 'FOR' | 'AGAINST' | "DIDN'T VOTE"
 
-// ===== Config: optional Issue chips =====
-// If left empty, the UI falls back to a Bill Picker from CSV headers.
+// ===== Config (issue chips). If empty → falls back to Bill chips derived from CSV =====
 const ISSUE_MAP: {
   key: string
   label: string
   columns: string[]
-  proVote?: Record<string, 'Y' | 'N'> // when 'N' is the pro-issue position for a given bill
-}[] = []
+  // mark bills where NO is the pro-issue position
+  proVote?: Record<string, 'Y' | 'N'>
+}[] = [
+  // { key: 'schools', label: 'Public School Funding', columns: ['HB210_2025', 'HB583_2025'] },
+  // { key: 'repro',   label: 'Reproductive Freedom', columns: ['HB1_2025'], proVote: { HB1_2025: 'N' } },
+]
 
-// Public building (not a residence)
+// Public building; safe default
 const DEFAULT_ADDRESS = '25 Capitol St, Concord, NH 03301'
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
 
 // ===== Vote normalization =====
-const FOR_VALUES = new Set(['y', 'yes', 'aye', 'for'])
-const AGAINST_VALUES = new Set(['n', 'no', 'nay', 'against'])
-const ABSENT_VALUES = new Set([
-  'nv', 'na', 'x', 'excused', 'absent', 'did not vote', "didn't vote", 'didn’t vote', 'not voting', 'no vote', 'present', 'p', 'abstain'
-])
+const FOR_VALUES = new Set(['y', 'yes', 'aye', 'yea', 'for', 'support', 'supported', 'in favor', 'in favour'])
+const AGAINST_VALUES = new Set(['n', 'no', 'nay', 'against', 'oppose', 'opposed'])
+const ABSENT_PAT = /(did\s*not\s*vote|didn.?t\s*vote|not\s*vot|no\s*vote|nv|excused|absent|present|abstain)/i
+
 function normalizeVoteCell(raw: unknown): Decision | null {
   if (raw == null) return null
   const v = String(raw).trim().toLowerCase()
   if (!v) return null
-  // FOR
-  if (FOR_VALUES.has(v) || /(in\s*favor|support|supported|yea)/.test(v)) return 'FOR'
-  // AGAINST
-  if (AGAINST_VALUES.has(v) || /(oppose|opposed)/.test(v)) return 'AGAINST'
-  // DIDN'T VOTE
-  if (ABSENT_VALUES.has(v) || /(did\s*not\s*vote|didn.?t\s*vote|no\s*vote)/.test(v)) return "DIDN'T VOTE"
+  if (FOR_VALUES.has(v)) return 'FOR'
+  if (AGAINST_VALUES.has(v)) return 'AGAINST'
+  if (ABSENT_PAT.test(v)) return "DIDN'T VOTE"
+  // single letters already covered, but double-check
+  if (v === 'y') return 'FOR'
+  if (v === 'n') return 'AGAINST'
   return null
 }
 
 function labelFromColumn(col: string): string {
-  const m = col.match(/(?:VOTE_)?((?:HB|SB|HR|HCR|SCR)\s?\d{1,4})(?:[_\-\s]?(\d{4}))?/i)
+  const m = col.match(/(?:VOTE_)?((?:HB|SB|HR|HCR|SCR)\s?(\d{1,4}))(?:[_\-\s]?(\d{4}))?/i)
   if (m) {
-    const bill = m[1].toUpperCase().replace(/\s+/g, '')
-    const year = m[2]
+    const bill = `${m[1].toUpperCase().replace(/\s+/g, '')}`
+    const year = m[3]
     return year ? `${bill} (${year})` : bill
   }
   return col.replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-// ===== CSV parsing =====
+// ===== CSV parsing (supports wide and long) =====
 function splitCSVLine(line: string): string[] {
   const out: string[] = []
-  let cur = ''
-  let inQuotes = false
+  let cur = '', inQuotes = false
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]
     if (inQuotes) {
@@ -104,12 +101,45 @@ async function fetchVotesCSV() {
   return parseCSV(await res.text())
 }
 
-function normKey(s: string) {
-  return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '').trim()
+function normKey(s: string) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '').trim() }
+
+function extractBillKey(str: string): string {
+  const s = String(str || '')
+  const m = s.match(/(HB|SB|HR|HCR|SCR)\s*-?\s*(\d{1,4})(?:.*?(\d{4}))?/i)
+  if (m) {
+    const bill = `${m[1].toUpperCase()}${m[2]}`
+    const year = m[3]
+    return year ? `${bill}_${year}` : bill // HB148_2025 or HB148
+  }
+  // fallback: sanitize to something stable
+  return s.replace(/[^A-Za-z0-9]+/g, '_').toUpperCase()
 }
 
+// Build person→{bill:rawVote} map from either long or wide CSV
 function buildVotesMapFromCSV(rows: Record<string, string>[]): VotesByPerson {
   const out: VotesByPerson = {}
+  const hasLong = rows.some((r) => 'bill' in r && 'vote' in r)
+
+  if (hasLong) {
+    for (const r of rows) {
+      const id = (r['openstates_person_id'] || r['person_id'] || r['id'] || '').trim()
+      if (!id) continue
+      const billKey = extractBillKey(r['bill'])
+      const val = String(r['vote'] ?? '')
+
+      if (!out[id]) out[id] = {}
+      out[id][billKey] = val
+
+      // alias joins
+      const nameKey = normKey(String(r['name'] || ''))
+      const distKey = normKey(String(r['district'] || ''))
+      if (nameKey) out[`name:${nameKey}`] = out[id]
+      if (nameKey || distKey) out[`nd:${nameKey}|${distKey}`] = out[id]
+    }
+    return out
+  }
+
+  // Wide: one row per person, many bill columns
   for (const r of rows) {
     const id = (r['openstates_person_id'] || r['person_id'] || r['id'] || '').trim()
     if (!id) continue
@@ -118,9 +148,8 @@ function buildVotesMapFromCSV(rows: Record<string, string>[]): VotesByPerson {
       if (k === 'openstates_person_id' || k === 'person_id' || k === 'id' || k === 'name' || k === 'district') continue
       copy[k] = String(v ?? '')
     }
-    // primary by ID
     out[id] = copy
-    // aliases (non-breaking) by name and name|district to tolerate minor mismatches
+
     const nameKey = normKey(String(r['name'] || ''))
     const distKey = normKey(String(r['district'] || ''))
     if (nameKey) out[`name:${nameKey}`] = copy
@@ -189,9 +218,11 @@ export default function Page() {
 
   useEffect(() => { setAddress(DEFAULT_ADDRESS) }, [])
 
+  // union of bill columns present in the votes map
   const voteColumns = useMemo(() => {
     const cols = new Set<string>()
     Object.values(votesByPerson).forEach((r) => Object.keys(r).forEach((k) => cols.add(k)))
+    // scrub potential identity keys if any slipped in
     ;['openstates_person_id','person_id','id','name','district'].forEach((k) => cols.delete(k))
     return Array.from(cols).sort()
   }, [votesByPerson])
@@ -218,13 +249,17 @@ export default function Page() {
       const norm = normalizeReps(payload?.stateRepresentatives)
       setReps(norm)
 
-      // 2) votes CSV
+      // 2) votes CSV (supports long/wide)
       const { headers, rows } = await fetchVotesCSV()
       const map = buildVotesMapFromCSV(rows)
       setVotesByPerson(map)
+
+      // if no ISSUE_MAP, prime with first bill column
       if (!ISSUE_MAP.length) {
-        const billCols = headers.filter((h) => !['openstates_person_id','person_id','id','name','district'].includes(h))
-        if (billCols.length) setActiveBillCol(billCols[0])
+        const derivedCols = new Set<string>()
+        Object.values(map).forEach((row) => Object.keys(row).forEach((k) => derivedCols.add(k)))
+        const billCols = Array.from(derivedCols).filter((h) => !['openstates_person_id','person_id','id','name','district'].includes(h))
+        if (billCols.length) setActiveBillCol(billCols.sort()[0])
       }
     } catch (e: any) {
       setError(e?.message || 'Fetch failed')
@@ -295,7 +330,7 @@ export default function Page() {
         <div className="space-y-2">
           <div className="text-sm text-gray-600">Pick a bill:</div>
           <div className="flex flex-wrap gap-2 overflow-x-auto">
-            {voteColumns.map((c) => (
+            {voteColumns.slice(0, 60).map((c) => (
               <button
                 key={c}
                 onClick={() => setActiveBillCol(c)}
@@ -306,7 +341,9 @@ export default function Page() {
             ))}
           </div>
         </div>
-      ) : null}
+      ) : (
+        <div className="text-sm text-gray-600">No vote columns detected. Confirm <code>/house_key_votes.csv</code> has headers and rows.</div>
+      )}
 
       {/* Verdicts for ALL reps */}
       {reps.length > 0 && (
@@ -330,7 +367,8 @@ export default function Page() {
                     <div className="text-sm mt-1">
                       <div>Bill: <strong>{labelFromColumn(v.usedColumn)}</strong></div>
                       <div>
-                        {rep.name}'s vote: <strong>{normalizeVoteCell(getPersonVotes(rep, votesByPerson)?.[v.usedColumn] ?? '') || 'No record'}</strong>
+                        {rep.name}'s vote:{' '}
+                        <strong>{normalizeVoteCell(getPersonVotes(rep, votesByPerson)?.[v.usedColumn] ?? '') || 'No record'}</strong>
                       </div>
                     </div>
                   </details>
@@ -339,11 +377,6 @@ export default function Page() {
             )
           })}
         </div>
-      )}
-
-      {/* Admin hint */}
-      {issues.length === 0 && voteColumns.length === 0 && (
-        <div className="text-xs text-gray-500">No vote columns detected. Confirm <code>/house_key_votes.csv</code> has headers and rows.</div>
       )}
     </div>
   )
