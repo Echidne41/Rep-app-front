@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 
-// ===== Types =====
+/* ========= Types ========= */
 type Rep = {
   openstates_person_id: string
   name: string
@@ -17,22 +17,26 @@ type LookupResponse = { address?: string; geographies?: any; stateRepresentative
 type VotesByPerson = Record<string, Record<string, string | null | undefined>>
 type Decision = 'FOR' | 'AGAINST' | "DIDN'T VOTE"
 
-// ===== Config (optional issue chips). If empty → falls back to Bill chips =====
+/* ========= Config (optional issue chips). Leave empty to use Bill chips ========= */
 const ISSUE_MAP: {
   key: string; label: string; columns: string[]; proVote?: Record<string,'Y'|'N'>
 }[] = [
+  // Example:
   // { key: 'schools', label: 'Public School Funding', columns: ['HB210_2025','HB583_2025'] },
   // { key: 'repro',   label: 'Reproductive Freedom', columns: ['HB1_2025'], proVote: { HB1_2025: 'N' } },
 ]
 
-// Public building; safe default
+/* ========= Constants ========= */
 const DEFAULT_ADDRESS = '25 Capitol St, Concord, NH 03301'
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || ''
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_BASE ||
+  'https://nh-rep-finder-api-staging.onrender.com' // safe fallback for staging
 
-// ===== Vote normalization =====
+/* ========= Vote normalization ========= */
 const FOR_VALUES = new Set(['y','yes','aye','yea','for','support','supported','in favor','in favour'])
 const AGAINST_VALUES = new Set(['n','no','nay','against','oppose','opposed'])
 const ABSENT_PAT = /(did\s*not\s*vote|didn.?t\s*vote|not\s*vot|no\s*vote|nv|excused|absent|present|abstain)/i
+
 function normalizeVoteCell(raw: unknown): Decision | null {
   if (raw == null) return null
   const v = String(raw).trim().toLowerCase()
@@ -44,6 +48,7 @@ function normalizeVoteCell(raw: unknown): Decision | null {
   if (v === 'n') return 'AGAINST'
   return null
 }
+
 function labelFromColumn(col: string): string {
   const m = col.match(/(?:VOTE_)?((?:HB|SB|HR|HCR|SCR)\s?(\d{1,4}))(?:[_\-\s]?(\d{4}))?/i)
   if (m) {
@@ -54,7 +59,7 @@ function labelFromColumn(col: string): string {
   return col.replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-// ===== CSV/JSON votes parsing =====
+/* ========= CSV / JSON helpers ========= */
 function splitCSVLine(line: string): string[] {
   const out: string[] = []; let cur = ''; let inQuotes = false
   for (let i = 0; i < line.length; i++) {
@@ -92,7 +97,6 @@ async function fetchVotesPreviewJSON(): Promise<Record<string,string>[]> {
   const r = await fetch(url, { cache: 'no-store' })
   if (!r.ok) throw new Error(`preview HTTP ${r.status}`)
   const j: any = await r.json()
-  // Tolerant unwrapping: {data:[...]}, {rows:[...]}, or [...]
   if (Array.isArray(j)) return j as any[]
   if (j?.data && Array.isArray(j.data)) return j.data as any[]
   if (j?.rows && Array.isArray(j.rows)) return j.rows as any[]
@@ -111,7 +115,7 @@ function extractBillKey(str: string): string {
   return s.replace(/[^A-Za-z0-9]+/g,'_').toUpperCase()
 }
 
-// Build person→{bill:rawVote} from long OR wide rows
+/* Build person→{bill:rawVote} from long OR wide rows */
 function buildVotesMap(rows: Record<string,string>[]): VotesByPerson {
   const out: VotesByPerson = {}
   const isLong = rows.some(r => 'bill' in r && 'vote' in r)
@@ -174,7 +178,12 @@ function getPersonVotes(rep: Rep, votesByPerson: VotesByPerson) {
   )
 }
 
-function decideForIssue(rep: Rep, votesByPerson: VotesByPerson, cols: string[], pro?: Record<string,'Y'|'N'>) {
+function decideForIssue(
+  rep: Rep,
+  votesByPerson: VotesByPerson,
+  cols: string[],
+  pro?: Record<string,'Y'|'N'>
+) {
   const pv = getPersonVotes(rep, votesByPerson)
   for (const col of cols) {
     if (!(col in pv)) continue
@@ -192,6 +201,7 @@ function decideForIssue(rep: Rep, votesByPerson: VotesByPerson, cols: string[], 
   return { decision: "DIDN'T VOTE" as Decision }
 }
 
+/* ========= Page ========= */
 export default function Page() {
   const [address, setAddress] = useState('')
   const [loading, setLoading] = useState(false)
@@ -206,36 +216,35 @@ export default function Page() {
 
   useEffect(() => { setAddress(DEFAULT_ADDRESS) }, [])
 
-  // union of bill columns present in the votes map
   const voteColumns = useMemo(() => {
     const cols = new Set<string>()
-    Object.values(votesByPerson).forEach((r) => Object.keys(r).forEach((k) => cols.add(k)))
-    ;['openstates_person_id','person_id','id','name','district'].forEach((k) => cols.delete(k))
+    Object.values(votesByPerson).forEach(r => Object.keys(r).forEach(k => cols.add(k)))
+    ;['openstates_person_id','person_id','id','name','district'].forEach(k => cols.delete(k))
     return Array.from(cols).sort()
   }, [votesByPerson])
 
   const issues = useMemo(() => {
-    return ISSUE_MAP.map((i) => ({ ...i, usableColumns: i.columns.filter((c) => voteColumns.includes(c)) }))
-                   .filter((i) => i.usableColumns.length > 0)
+    return ISSUE_MAP.map(i => ({ ...i, usableColumns: i.columns.filter(c => voteColumns.includes(c)) }))
+                    .filter(i => i.usableColumns.length > 0)
   }, [voteColumns])
 
   useEffect(() => { if (!activeIssueKey && issues.length) setActiveIssueKey(issues[0].key) }, [issues, activeIssueKey])
   useEffect(() => { if (!activeBillCol && !issues.length && voteColumns.length) setActiveBillCol(voteColumns[0]) }, [voteColumns, issues, activeBillCol])
 
   async function handleFind() {
-    if (!API_BASE) { setError('NEXT_PUBLIC_API_BASE is not set'); setAttempted(true); return }
-    setLoading(true); setError(null); setAttempted(true)
+    setAttempted(true)
+    if (!API_BASE) { setError('NEXT_PUBLIC_API_BASE is not set'); return }
+    setLoading(true); setError(null)
     try {
-      // 1) reps
+      // reps
       const u = new URL(API_BASE + '/api/lookup-legislators')
       u.searchParams.set('address', address); u.searchParams.set('ts', String(Date.now()))
       const res = await fetch(u.toString(), { cache: 'no-store' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const j: any = await res.json()
-      const payload: LookupResponse = (j?.data ?? j) as LookupResponse
-      setReps(normalizeReps(payload?.stateRepresentatives))
+      setReps(normalizeReps((j?.data ?? j as LookupResponse).stateRepresentatives))
 
-      // 2) votes: try JSON preview first, then CSV
+      // votes: preview JSON → CSV fallback
       let rows: Record<string,string>[] = []
       try { rows = await fetchVotesPreviewJSON() } catch {}
       if (!rows || rows.length === 0) {
@@ -247,9 +256,11 @@ export default function Page() {
 
       if (!ISSUE_MAP.length) {
         const derivedCols = new Set<string>()
-        Object.values(map).forEach((row) => Object.keys(row).forEach((k) => derivedCols.add(k)))
-        const billCols = Array.from(derivedCols).filter((h) => !['openstates_person_id','person_id','id','name','district'].includes(h))
-        if (billCols.length) setActiveBillCol(billCols.sort()[0])
+        Object.values(map).forEach(row => Object.keys(row).forEach(k => derivedCols.add(k)))
+        const billCols = Array.from(derivedCols)
+          .filter(h => !['openstates_person_id','person_id','id','name','district'].includes(h))
+          .sort()
+        if (billCols.length) setActiveBillCol(billCols[0])
       }
     } catch (e: any) {
       setError(e?.message || 'Fetch failed')
@@ -269,7 +280,7 @@ export default function Page() {
 
   function verdictFor(rep: Rep) {
     if (activeIssueKey) {
-      const issue = issues.find((i) => i.key === activeIssueKey)
+      const issue = issues.find(i => i.key === activeIssueKey)
       if (issue) return decideForIssue(rep, votesByPerson, (issue as any).usableColumns, (issue as any).proVote)
     }
     if (activeBillCol) return decideForBill(rep, activeBillCol)
@@ -332,7 +343,9 @@ export default function Page() {
           </div>
         </div>
       ) : attempted ? (
-        <div className="text-sm text-gray-600">No vote columns detected. Confirm <code>/house_key_votes.csv</code> or <code>/debug/votes-preview</code> returns rows.</div>
+        <div className="text-sm text-gray-600">
+          No vote columns detected. Confirm <code>/debug/votes-preview</code> or <code>/house_key_votes.csv</code> returns rows.
+        </div>
       ) : null}
 
       {/* Verdicts for ALL reps */}
