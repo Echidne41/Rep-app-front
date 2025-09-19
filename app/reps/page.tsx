@@ -37,15 +37,29 @@ const FOR_VALUES = new Set(['y','yes','aye','yea','for','support','supported','i
 const AGAINST_VALUES = new Set(['n','no','nay','against','oppose','opposed'])
 const ABSENT_PAT = /(did\s*not\s*vote|didn.?t\s*vote|not\s*vot|no\s*vote|nv|excused|absent|present|abstain)/i
 
-function normalizeVoteCell(raw: unknown): Decision | null {
+function normalizeVoteCell(raw: unknown): 'FOR' | 'AGAINST' | "DIDN'T VOTE" | null {
   if (raw == null) return null
   const v = String(raw).trim().toLowerCase()
   if (!v) return null
-  if (FOR_VALUES.has(v)) return 'FOR'
-  if (AGAINST_VALUES.has(v)) return 'AGAINST'
-  if (ABSENT_PAT.test(v)) return "DIDN'T VOTE"
-  if (v === 'y') return 'FOR'
-  if (v === 'n') return 'AGAINST'
+
+  // FOR
+  if (
+    v === 'y' || v === 'yes' || v === 'aye' || v === 'yea' || v === 'for' ||
+    v.includes('in favor') || v.includes('support') || v.includes('supported') ||
+    /^pro[\s-]/.test(v)  // e.g., "Pro-LGBTQ Vote"
+  ) return 'FOR'
+
+  // AGAINST
+  if (
+    v === 'n' || v === 'no' || v === 'nay' || v === 'against' ||
+    v.includes('oppose') || v.includes('opposed') ||
+    /^anti[\s-]/.test(v) // e.g., "Anti-Choice"
+  ) return 'AGAINST'
+
+  // DIDN'T VOTE / absent / excused / present / abstain
+  if (/(did\s*not\s*vote|didn.?t\s*vote|not\s*vot|no\s*vote|nv|excused|absent|present|abstain)/.test(v))
+    return "DIDN'T VOTE"
+
   return null
 }
 
@@ -97,11 +111,18 @@ async function fetchVotesPreviewJSON(): Promise<Record<string,string>[]> {
   const r = await fetch(url, { cache: 'no-store' })
   if (!r.ok) throw new Error(`preview HTTP ${r.status}`)
   const j: any = await r.json()
-  if (Array.isArray(j)) return j as any[]
-  if (j?.data && Array.isArray(j.data)) return j.data as any[]
-  if (j?.rows && Array.isArray(j.rows)) return j.rows as any[]
-  return []
+  const rows: any[] =
+    Array.isArray(j) ? j :
+    Array.isArray(j?.data) ? j.data :
+    Array.isArray(j?.rows) ? j.rows : []
+
+  // If preview rows don't contain ANY id/name info, reject so we fall back to CSV
+  const hasPersonFields = rows.some(
+    (x) => x?.openstates_person_id || x?.person_id || x?.id || x?.name
+  )
+  return hasPersonFields ? (rows as Record<string,string>[]) : []
 }
+
 
 function normKey(s: string) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g,'').trim() }
 function extractBillKey(str: string): string {
