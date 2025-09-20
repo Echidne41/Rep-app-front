@@ -2,6 +2,9 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import AddressSuggest from '@/components/AddressSuggest';
+import AddressSuggest from '@/components/AddressSuggest';
+// If that path errors, use: import AddressSuggest from '../../components/AddressSuggest';
+
 
 /* ========= Types ========= */
 type Rep = {
@@ -372,23 +375,24 @@ export default function Page() {
     <div className="mx-auto max-w-3xl p-4 space-y-4">
       <h1 className="text-2xl font-semibold">Find Your NH House Rep</h1>
 
-      {/* Address Search */}
-      <div className="flex gap-2">
-        <input
-          aria-label="Enter your address"
-          value={address}
-          onChange={(e) => setAddress(e.target.value)}
-          className="flex-1 border rounded-lg px-3 py-2"
-          placeholder="Enter your address"
-        />
-        <button
-          onClick={handleFind}
-          disabled={loading || !address.trim()}
-          className="rounded-lg px-4 py-2 border disabled:opacity-50"
-        >
-          {loading ? 'Finding…' : 'Find'}
-        </button>
-      </div>
+{/* Address Search */}
+<div className="flex gap-2">
+  <AddressSuggest
+    value={address}
+    onChange={setAddress}
+    onSelect={(addr) => { setAddress(addr); handleFind(); }} // auto-search when a suggestion is picked
+    onEnter={handleFind}                                     // pressing Enter runs the search
+    placeholder="Start typing your address…"
+  />
+  <button
+    onClick={handleFind}
+    disabled={loading || !address.trim()}
+    className="rounded-lg px-4 py-2 border disabled:opacity-50"
+  >
+    {loading ? 'Finding…' : 'Find'}
+  </button>
+</div>
+
 
       {error && <div className="text-red-700 text-sm" role="alert">{error}</div>}
 
