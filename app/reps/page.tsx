@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useState } from 'react'
+import AddressSuggest from '@/components/AddressSuggest';
 
 /* ========= Types ========= */
 type Rep = {
