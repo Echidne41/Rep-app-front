@@ -36,6 +36,7 @@ const API_BASE =
 const FOR_VALUES = new Set(['y','yes','aye','yea','for','support','supported','in favor','in favour'])
 const AGAINST_VALUES = new Set(['n','no','nay','against','oppose','opposed'])
 const ABSENT_PAT = /(did\s*not\s*vote|didn.?t\s*vote|not\s*vot|no\s*vote|nv|excused|absent|present|abstain)/i
+
 function normalizeVoteCell(raw: unknown): Decision | null {
   if (raw == null) return null
   const v = String(raw).trim().toLowerCase()
@@ -47,6 +48,7 @@ function normalizeVoteCell(raw: unknown): Decision | null {
   if (v === 'n') return 'AGAINST'
   return null
 }
+
 function labelFromColumn(col: string): string {
   const m = col.match(/(?:VOTE_)?((?:HB|SB|HR|HCR|SCR)\s?(\d{1,4}))(?:[_\-\s]?(\d{4}))?/i)
   if (m) {
@@ -57,104 +59,17 @@ function labelFromColumn(col: string): string {
   return col.replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-/* ========= CSV helpers ========= */
-function splitCSVLine(line: string): string[] {
-  const out: string[] = []; let cur = ''; let inQuotes = false
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]
-    if (inQuotes) {
-      if (ch === '"') { if (line[i+1] === '"') { cur += '"'; i++ } else { inQuotes = false } }
-      else cur += ch
-    } else {
-      if (ch === ',') { out.push(cur); cur = '' }
-      else if (ch === '"') inQuotes = true
-      else cur += ch
-    }
-  }
-  out.push(cur); return out
-}
-function parseCSV(text: string): { headers: string[]; rows: Record<string,string>[] } {
-  const lines = text.replace(/\r\n?/g,'\n').split('\n').filter(l => l.length>0)
-  if (!lines.length) return { headers: [], rows: [] }
-  const headers = splitCSVLine(lines[0]).map(h => h.trim())
-  const rows: Record<string,string>[] = []
-  for (let i=1;i<lines.length;i++) {
-    const parts = splitCSVLine(lines[i]); const row: Record<string,string> = {}
-    for (let c=0;c<headers.length;c++) row[headers[c]] = parts[c] ?? ''
-    rows.push(row)
-  }
-  return { headers, rows }
-}
-async function fetchVotesCSV() {
-  // allow browser caching; backend redeploy updates the file
-  const res = await fetch(`${API_BASE}/house_key_votes.csv`)
-  if (!res.ok) throw new Error(`CSV HTTP ${res.status}`)
-  return parseCSV(await res.text())
+/* ========= Backend JSON helpers ========= */
+async function fetchVoteMapJSON(): Promise<{ columns: string[]; votes: Record<string, Record<string, string>> }> {
+  const res = await fetch(`${API_BASE}/api/vote-map?ts=${Date.now()}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(`vote-map HTTP ${res.status}`)
+  const j = await res.json()
+  return { columns: j.columns || [], votes: j.votes || {} }
 }
 
-/* ========= Map building (supports long or wide) ========= */
+/* ========= Joins & transforms ========= */
 function normKey(s: string) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g,'').trim() }
-function extractBillKey(str: string): string {
-  const s = String(str || '')
-  const m = s.match(/(HB|SB|HR|HCR|SCR)\s*-?\s*(\d{1,4})(?:.*?(\d{4}))?/i)
-  if (m) {
-    const bill = `${m[1].toUpperCase()}${m[2]}`
-    const year = m[3]
-    return year ? `${bill}_${year}` : bill
-  }
-  return s.replace(/[^A-Za-z0-9]+/g,'_').toUpperCase()
-}
-/** Build person→{bill: rawVote} from long OR wide rows. */
-function buildVotesMap(rows: Record<string,string>[]): VotesByPerson {
-  const out: VotesByPerson = {}
-  const isLong = rows.some(r => 'bill' in r && 'vote' in r)
 
-  if (isLong) {
-    for (const r of rows) {
-      const id = (r['openstates_person_id'] || r['person_id'] || r['id'] || '').trim()
-      const billKey = extractBillKey(r['bill'])
-      if (!billKey) continue
-      const val = String(r['vote'] ?? '')
-
-      if (id) {
-        if (!out[id]) out[id] = {}
-        out[id][billKey] = val
-      }
-
-      const nameKey = normKey(String(r['name'] || ''))
-      const distKey = normKey(String(r['district'] || ''))
-      if (nameKey) {
-        if (!out[`name:${nameKey}`]) out[`name:${nameKey}`] = id ? out[id] : {}
-        out[`name:${nameKey}`][billKey] = val
-      }
-      if (nameKey || distKey) {
-        const nd = `nd:${nameKey}|${distKey}`
-        if (!out[nd]) out[nd] = id ? out[id] || {} : {}
-        out[nd][billKey] = val
-      }
-    }
-    return out
-  }
-
-  // wide (one row per person)
-  for (const r of rows) {
-    const id = (r['openstates_person_id'] || r['person_id'] || r['id'] || '').trim()
-    const copy: Record<string,string> = {}
-    for (const [k,v] of Object.entries(r)) {
-      if (['openstates_person_id','person_id','id','name','district'].includes(k)) continue
-      copy[k] = String(v ?? '')
-    }
-    if (id) out[id] = copy
-
-    const nameKey = normKey(String(r['name'] || ''))
-    const distKey = normKey(String(r['district'] || ''))
-    if (nameKey) out[`name:${nameKey}`] = copy
-    if (nameKey || distKey) out[`nd:${nameKey}|${distKey}`] = copy
-  }
-  return out
-}
-
-/* ========= Rep helpers ========= */
 function normalizeReps(list: RawRep[] | undefined | null): Rep[] {
   if (!list) return []
   return list.map(r => ({
@@ -167,6 +82,7 @@ function normalizeReps(list: RawRep[] | undefined | null): Rep[] {
     links: (r as any).links || []
   })).filter(r => r.openstates_person_id || r.name)
 }
+
 function getPersonVotes(rep: Rep, votesByPerson: VotesByPerson) {
   return (
     votesByPerson[rep.openstates_person_id] ||
@@ -176,7 +92,6 @@ function getPersonVotes(rep: Rep, votesByPerson: VotesByPerson) {
   )
 }
 
-/* ========= Decision helpers ========= */
 function decideForIssue(
   rep: Rep,
   votesByPerson: VotesByPerson,
@@ -209,6 +124,7 @@ export default function Page() {
 
   const [reps, setReps] = useState<Rep[]>([])
   const [votesByPerson, setVotesByPerson] = useState<VotesByPerson>({})
+  const [voteColumns, setVoteColumns] = useState<string[]>([])
   const [votesReady, setVotesReady] = useState(false)
 
   const [activeIssueKey, setActiveIssueKey] = useState<string | null>(null)
@@ -216,33 +132,26 @@ export default function Page() {
 
   useEffect(() => { setAddress(DEFAULT_ADDRESS) }, [])
 
-  // Preload CSV once to speed first search
+  // Preload vote map once for speed
   useEffect(() => {
     (async () => {
       try {
-        const csv = await fetchVotesCSV()
-        const map = buildVotesMap(csv.rows)
-        setVotesByPerson(map)
+        const { columns, votes } = await fetchVoteMapJSON()
+        setVotesByPerson(votes)
+        setVoteColumns(columns || [])
         setVotesReady(true)
-      } catch { /* ignore; we'll do it on demand */ }
+        if (!ISSUE_MAP.length && columns?.length && !activeBillCol) setActiveBillCol(columns[0])
+      } catch { /* ignore; fallback in handleFind */ }
     })()
-  }, [])
-
-  // union of bill columns present in the votes map
-  const voteColumns = useMemo(() => {
-    const cols = new Set<string>()
-    Object.values(votesByPerson).forEach(r => Object.keys(r).forEach(k => cols.add(k)))
-    ;['openstates_person_id','person_id','id','name','district'].forEach(k => cols.delete(k))
-    return Array.from(cols).sort()
-  }, [votesByPerson])
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const issues = useMemo(() => {
-    return ISSUE_MAP.map(i => ({ ...i, usableColumns: i.columns.filter(c => voteColumns.includes(c)) }))
+    const available = new Set(voteColumns)
+    return ISSUE_MAP.map(i => ({ ...i, usableColumns: i.columns.filter(c => available.has(c)) }))
                     .filter(i => i.usableColumns.length > 0)
   }, [voteColumns])
 
   useEffect(() => { if (!activeIssueKey && issues.length) setActiveIssueKey(issues[0].key) }, [issues, activeIssueKey])
-  useEffect(() => { if (!activeBillCol && !issues.length && voteColumns.length) setActiveBillCol(voteColumns[0]) }, [voteColumns, issues, activeBillCol])
 
   async function handleFind() {
     setAttempted(true)
@@ -254,26 +163,21 @@ export default function Page() {
       repsUrl.searchParams.set('ts', String(Date.now()))
 
       if (!votesReady) {
-        // First run: reps + CSV in parallel
-        const [repsRes, csv] = await Promise.all([
+        // First run: reps + vote map in parallel
+        const [repsRes, voteMap] = await Promise.all([
           fetch(repsUrl.toString(), { cache: 'no-store' }),
-          fetchVotesCSV(),
+          fetchVoteMapJSON(),
         ])
         if (!repsRes.ok) throw new Error(`HTTP ${repsRes.status}`)
         const j: any = await repsRes.json()
         setReps(normalizeReps((j?.data ?? j as LookupResponse).stateRepresentatives))
 
-        const map = buildVotesMap(csv.rows)
-        setVotesByPerson(map)
+        setVotesByPerson(voteMap.votes)
+        setVoteColumns(voteMap.columns || [])
         setVotesReady(true)
 
-        if (!ISSUE_MAP.length && !activeBillCol) {
-          const cols = new Set<string>()
-          Object.values(map).forEach(r => Object.keys(r).forEach(k => cols.add(k)))
-          const billCols = Array.from(cols)
-            .filter(h => !['openstates_person_id','person_id','id','name','district'].includes(h))
-            .sort()
-          if (billCols.length) setActiveBillCol(billCols[0])
+        if (!ISSUE_MAP.length && !activeBillCol && voteMap.columns?.length) {
+          setActiveBillCol(voteMap.columns[0])
         }
       } else {
         // Later runs: reps only
@@ -364,7 +268,7 @@ export default function Page() {
         </div>
       ) : attempted ? (
         <div className="text-sm text-gray-600">
-          No vote columns detected. Confirm <code>/house_key_votes.csv</code> has rows.
+          No vote columns detected. Confirm <code>/api/vote-map</code> returns columns and votes.
         </div>
       ) : null}
 
