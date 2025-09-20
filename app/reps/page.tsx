@@ -16,15 +16,102 @@ type RawRep = Partial<Rep> & { id?: string }
 type LookupResponse = { address?: string; geographies?: any; stateRepresentatives: RawRep[] }
 type VotesByPerson = Record<string, Record<string, string | null | undefined>>
 type Decision = 'FOR' | 'AGAINST' | "DIDN'T VOTE"
-
 type IssueDef = { key: string; label: string; columns: string[]; proVote?: Record<string,'Y'|'N'> }
 
-/* ========= Config: manual Issue chips (leave empty to auto-derive from column names) ========= */
+/* ========= Config ========= */
+/** Manual issues using your exact column headers (typos included), but clean labels on buttons. */
 const ISSUE_MAP_MANUAL: IssueDef[] = [
-  // Example:
-  // { key: 'schools', label: 'Public School Funding', columns: ['HB115 - Public School Funding (Vouchers)'] },
-  // { key: 'lgbtq',   label: 'LGBTQ Rights',         columns: ['HB148 - LGBTQ Rights'] },
-  // { key: 'budget',  label: 'State Budget',         columns: ['HB1 – State Funding Bill'] },
+  {
+    key: 'budget',
+    label: 'State Budget',
+    columns: [
+      'HB1 - State Funding Bill',
+      'HB2 - Budget Trailer (All the Policy Stuff)',
+      'HB25 - The Dems Budget Proposal',
+    ],
+  },
+  {
+    key: 'schools',
+    label: 'Public School Funding (K-12)',
+    columns: [
+      'HB115-Public School Funding (Vouchers)',
+      'HB211 - Public School Funding',
+      'HB214 Public School Funding',
+      'HB675 - School Funding Cap',
+      'HB26 - School Budget Cap Repeal',
+    ],
+  },
+  {
+    key: 'higher_ed',
+    label: 'Higher Education Funding',
+    columns: ['HB212 - Higher Ed Funding'],
+  },
+  {
+    key: 'lgbtq',
+    label: 'LGBTQ Rights',
+    columns: ['HB148 - LGBTQ Rights', 'HB22 - Portecting Trans People'],
+  },
+  {
+    key: 'repro',
+    label: 'Reproductive Freedom',
+    columns: ['HCR- Reproductive Freedom', 'HB27 - Family Planning Services'],
+    // If “No” is the pro stance for a specific bill, add: proVote: { 'Exact Column Header': 'N' }
+  },
+  {
+    key: 'child_family_health',
+    label: 'Child & Family Health/Safety',
+    columns: [
+      'HB29 - Medicaid',
+      'HB583 - Reducing Child Hunger',
+      'HB28 - Child Advocacy Services (Intervening in Child Neglect/Abuse)',
+      'HB433 -Child Marriage',
+    ],
+  },
+  {
+    key: 'public_health',
+    label: 'Public Health & Vaccinations',
+    columns: ['HB23 - Vaccinations'],
+  },
+  {
+    key: 'labor',
+    label: 'Labor Rights',
+    columns: ['HB238 - Labor Rights'],
+  },
+  {
+    key: 'guns',
+    label: 'Gun Safety',
+    columns: ['HB24 - Gun Control'],
+  },
+  {
+    key: 'democracy',
+    label: 'Voter Protection & Democracy',
+    columns: ['HB521 Voter Protection'],
+  },
+  {
+    key: 'energy_env',
+    label: 'Energy & Environment',
+    columns: ['HCR4 - Environment (Wind Power)'],
+  },
+  {
+    key: 'arts',
+    label: 'Arts & Culture',
+    columns: ['HB210 - Supprting the Arts'],
+  },
+  {
+    key: 'opioids',
+    label: 'Opioid Crisis',
+    columns: ['HB213 - Dealing with the Opioid Crisis'],
+  },
+  {
+    key: 'cannabis',
+    label: 'Cannabis Legalization',
+    columns: ['HB75 Legalizing Marijuana'],
+  },
+  {
+    key: 'human_rights_commission',
+    label: 'Human Rights Commission',
+    columns: ['HB215 - Human Rights Commision'],
+  },
 ]
 
 /* ========= Constants ========= */
@@ -33,7 +120,7 @@ const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE ||
   'https://nh-rep-finder-api-staging.onrender.com' // staging fallback
 
-/* ========= Vote normalization ========= */
+/* ========= Normalizers / helpers ========= */
 const FOR_VALUES = new Set(['y','yes','aye','yea','for','support','supported','in favor','in favour'])
 const AGAINST_VALUES = new Set(['n','no','nay','against','oppose','opposed'])
 const ABSENT_PAT = /(did\s*not\s*vote|didn.?t\s*vote|not\s*vot|no\s*vote|nv|excused|absent|present|abstain)/i
@@ -57,11 +144,9 @@ function labelFromColumn(col: string): string {
     const year = m[3]
     return year ? `${bill} (${year})` : bill
   }
-  // tidy “HB148 - LGBTQ Rights” → keep as-is (human friendly)
   return col.replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
-/* ========= Backend JSON helpers ========= */
 async function fetchVoteMapJSON(): Promise<{ columns: string[]; votes: Record<string, Record<string, string>> }> {
   const res = await fetch(`${API_BASE}/api/vote-map?ts=${Date.now()}`, { cache: 'no-store' })
   if (!res.ok) throw new Error(`vote-map HTTP ${res.status}`)
@@ -70,9 +155,16 @@ async function fetchVoteMapJSON(): Promise<{ columns: string[]; votes: Record<st
   return { columns: cols, votes: j.votes || {} }
 }
 
-/* ========= Joins & transforms ========= */
-function normKey(s: string) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g,'').trim() }
+async function fetchBillLink(billOrLabel: string): Promise<string> {
+  const params = new URLSearchParams()
+  params.set('label', billOrLabel)
+  const res = await fetch(`${API_BASE}/api/bill-link?${params.toString()}`, { cache: 'force-cache' })
+  if (!res.ok) return ''
+  const j = await res.json()
+  return j?.url || ''
+}
 
+function normKey(s: string) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g,'').trim() }
 function normalizeReps(list: RawRep[] | undefined | null): Rep[] {
   if (!list) return []
   return list.map(r => ({
@@ -95,8 +187,7 @@ function getPersonVotes(rep: Rep, votesByPerson: VotesByPerson) {
   )
 }
 
-/* ========= Column → Issue derivation ========= */
-/** Filter out non-vote columns that might sneak in from CSV */
+/** Filter out non-vote keys that might sneak into columns */
 function isNonVoteKey(k: string) {
   const lk = k.toLowerCase()
   return (
@@ -106,62 +197,62 @@ function isNonVoteKey(k: string) {
   )
 }
 
-/** Try to derive a human “issue” label from a column header.
- *  e.g., "HB148 - LGBTQ Rights" → "LGBTQ Rights"
- *        "HB1_2025" → null (no issue found; treat as bill chip)
- */
-function deriveIssueLabel(col: string): string | null {
-  const cleaned = col.replace(/\s+–\s+/g, ' - ') // normalize en dash to hyphen
-  const parts = cleaned.split(' - ')
-  if (parts.length >= 2) {
-    const issue = parts.slice(1).join(' - ').trim()
-    return issue || null
-  }
-  return null
-}
-
-/** Build issues dynamically from available vote columns, grouping by issue label. */
-function autoIssuesFromColumns(columns: string[]): IssueDef[] {
-  const groups = new Map<string, string[]>() // issueLabel -> [columns]
-  for (const c of columns) {
-    if (isNonVoteKey(c)) continue
-    const issue = deriveIssueLabel(c)
-    if (issue) {
-      const arr = groups.get(issue) || []
-      arr.push(c)
-      groups.set(issue, arr)
-    }
-  }
-  const out: IssueDef[] = []
-  for (const [label, cols] of groups) {
-    const key = normKey(label) || normKey(cols[0])
-    out.push({ key, label, columns: cols.slice().sort() })
-  }
-  return out.sort((a,b)=>a.label.localeCompare(b.label))
-}
-
-/* ========= Decision helpers ========= */
+/* ========= Decisions ========= */
 function decideForIssue(
   rep: Rep,
   votesByPerson: VotesByPerson,
   cols: string[],
   pro?: Record<string,'Y'|'N'>
-) {
+): { decision: Decision; usedColumn?: string; raw?: string | null } {
   const pv = getPersonVotes(rep, votesByPerson)
   for (const col of cols) {
     if (!(col in pv)) continue
     const raw = pv[col]
     const norm = normalizeVoteCell(raw)
-    if (norm === null) return { decision: "DIDN'T VOTE" as Decision, usedColumn: col, raw }
+    if (norm === null) return { decision: "DIDN'T VOTE", usedColumn: col, raw }
     if (pro && pro[col]) {
       const p = pro[col]
-      if (norm === 'FOR' && p === 'Y') return { decision: 'FOR' as Decision, usedColumn: col, raw }
-      if (norm === 'AGAINST' && p === 'N') return { decision: 'FOR' as Decision, usedColumn: col, raw }
-      return { decision: 'AGAINST' as Decision, usedColumn: col, raw }
+      if (norm === 'FOR' && p === 'Y') return { decision: 'FOR', usedColumn: col, raw }
+      if (norm === 'AGAINST' && p === 'N') return { decision: 'FOR', usedColumn: col, raw }
+      return { decision: 'AGAINST', usedColumn: col, raw }
     }
     return { decision: norm, usedColumn: col, raw }
   }
-  return { decision: "DIDN'T VOTE" as Decision }
+  return { decision: "DIDN'T VOTE" }
+}
+
+function decideForBill(rep: Rep, col: string | null, votesByPerson: VotesByPerson) {
+  if (!col) return { decision: "DIDN'T VOTE" as Decision }
+  const pv = getPersonVotes(rep, votesByPerson)
+  const raw = pv[col]
+  const norm = normalizeVoteCell(raw)
+  if (norm === null) return { decision: "DIDN'T VOTE" as Decision, usedColumn: col, raw }
+  return { decision: norm, usedColumn: col, raw }
+}
+
+/* ========= Small component: bill link button ========= */
+function BillLink({ label }: { label: string }) {
+  const [url, setUrl] = useState<string>('')
+  useEffect(() => {
+    let alive = true
+    ;(async () => {
+      const u = await fetchBillLink(label)
+      if (alive) setUrl(u)
+    })()
+    return () => { alive = false }
+  }, [label])
+
+  return (
+    <a
+      href={url || '#'}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`px-2 py-1 rounded border text-sm ${url ? 'hover:underline' : 'opacity-50 pointer-events-none'}`}
+      title={url ? 'Open bill text' : 'Looking up bill link…'}
+    >
+      {labelFromColumn(label)}
+    </a>
+  )
 }
 
 /* ========= Page ========= */
@@ -191,30 +282,24 @@ export default function Page() {
         setRawVoteColumns(filteredCols)
         setVotesReady(true)
 
-        // Prefer issues if derivable; else fall back to first bill column
-        const autoIssues = autoIssuesFromColumns(filteredCols)
+        // Prefer issues if possible; else fall back to first bill column
         if (ISSUE_MAP_MANUAL.length > 0) {
           if (!activeIssueKey) setActiveIssueKey(ISSUE_MAP_MANUAL[0].key)
-        } else if (autoIssues.length > 0) {
-          if (!activeIssueKey) setActiveIssueKey(autoIssues[0].key)
-        } else if (!activeBillCol && filteredCols.length) {
+        } else if (filteredCols.length && !activeBillCol) {
           setActiveBillCol(filteredCols[0])
         }
-      } catch { /* ignore; fallback in handleFind */ }
+      } catch { /* ignore; fallback during Find */ }
     })()
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-  // Build issues: manual > auto > none
+  // Build issues: manual > none (we’re not auto-deriving in this file since you provided a map)
   const issues: IssueDef[] = useMemo(() => {
-    if (ISSUE_MAP_MANUAL.length) {
-      // only include issues whose columns exist in data
-      const available = new Set(rawVoteColumns)
-      return ISSUE_MAP_MANUAL
-        .map(i => ({ ...i, columns: i.columns.filter(c => available.has(c)) }))
-        .filter(i => i.columns.length > 0)
-    }
-    const auto = autoIssuesFromColumns(rawVoteColumns)
-    return auto
+    if (!ISSUE_MAP_MANUAL.length) return []
+    const available = new Set(rawVoteColumns)
+    return ISSUE_MAP_MANUAL
+      .map(i => ({ ...i, columns: i.columns.filter(c => available.has(c)) }))
+      .filter(i => i.columns.length > 0)
   }, [rawVoteColumns])
 
   useEffect(() => { if (!activeIssueKey && issues.length) setActiveIssueKey(issues[0].key) }, [issues, activeIssueKey])
@@ -243,12 +328,9 @@ export default function Page() {
         setRawVoteColumns(filteredCols)
         setVotesReady(true)
 
-        const auto = autoIssuesFromColumns(filteredCols)
         if (ISSUE_MAP_MANUAL.length > 0) {
           if (!activeIssueKey) setActiveIssueKey(ISSUE_MAP_MANUAL[0].key)
-        } else if (auto.length > 0) {
-          if (!activeIssueKey) setActiveIssueKey(auto[0].key)
-        } else if (!activeBillCol && filteredCols.length) {
+        } else if (filteredCols.length && !activeBillCol) {
           setActiveBillCol(filteredCols[0])
         }
       } else {
@@ -265,21 +347,12 @@ export default function Page() {
     }
   }
 
-  function decideForBill(rep: Rep, col: string | null) {
-    if (!col) return { decision: "DIDN'T VOTE" as Decision }
-    const pv = getPersonVotes(rep, votesByPerson)
-    const raw = pv[col]
-    const norm = normalizeVoteCell(raw)
-    if (norm === null) return { decision: "DIDN'T VOTE" as Decision, usedColumn: col, raw }
-    return { decision: norm, usedColumn: col, raw }
-  }
-
   function verdictFor(rep: Rep) {
     if (activeIssueKey) {
       const issue = issues.find(i => i.key === activeIssueKey)
       if (issue) return decideForIssue(rep, votesByPerson, issue.columns, issue.proVote)
     }
-    if (activeBillCol) return decideForBill(rep, activeBillCol)
+    if (activeBillCol) return decideForBill(rep, activeBillCol, votesByPerson)
     return null
   }
 
@@ -375,17 +448,24 @@ export default function Page() {
                   {v?.decision === "DIDN'T VOTE" && <span>DIDN'T VOTE ︱ ?</span>}
                   {!v && <span className="text-gray-500">Select an issue or bill</span>}
                 </div>
+
+                {/* Bill link + rationale */}
                 {v?.usedColumn && (
-                  <details className="mt-2">
-                    <summary className="cursor-pointer text-sm">Why this answer</summary>
-                    <div className="text-sm mt-1">
-                      <div>Bill: <strong>{labelFromColumn(v.usedColumn)}</strong></div>
-                      <div>
-                        {rep.name}'s vote:{' '}
-                        <strong>{normalizeVoteCell(getPersonVotes(rep, votesByPerson)?.[v.usedColumn] ?? '') || 'No record'}</strong>
-                      </div>
+                  <>
+                    <div className="mt-2">
+                      <BillLink label={v.usedColumn} />
                     </div>
-                  </details>
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-sm">Why this answer</summary>
+                      <div className="text-sm mt-1">
+                        <div>Bill: <strong>{labelFromColumn(v.usedColumn)}</strong></div>
+                        <div>
+                          {rep.name}'s vote:{' '}
+                          <strong>{normalizeVoteCell(getPersonVotes(rep, votesByPerson)?.[v.usedColumn] ?? '') || 'No record'}</strong>
+                        </div>
+                      </div>
+                    </details>
+                  </>
                 )}
               </div>
             )
