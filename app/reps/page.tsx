@@ -48,23 +48,6 @@ def _deaccent(s: str) -> str:
 def _key(town: str, county: str) -> Tuple[str, str]:
     return (_title(_deaccent(town)), _title(_deaccent(county)))
 
-def _norm_district(label: str) -> str:
-    """
-    Normalize things like 'Sullivan 02' -> 'Sullivan 2', '02' -> '2'.
-    If county prefix exists, keep it; otherwise just return the int as string.
-    """
-    s = (label or "").strip()
-    # expand early if an abbrev like 'Me 30'
-    s = _expand_label(s)
-    m = re.match(r"^([A-Za-z]+)\s*0*([0-9]+)$", s)
-    if m:
-        return f"{m.group(1).title()} {int(m.group(2))}"
-    # just a number?
-    m2 = re.match(r"^0*([0-9]+)$", s)
-    if m2:
-        return str(int(m2.group(1)))
-    return s
-
 # --- expand county abbreviations like "Me 30" -> "Merrimack 30"
 ABBR = {
   'Be':'Belknap','Ca':'Carroll','Ch':'Cheshire','Co':'Coos','Gr':'Grafton',
@@ -75,6 +58,20 @@ def _expand_label(s: str) -> str:
     m = re.match(r'^(..)\s+(\d+)$', s)
     if m and m.group(1) in ABBR:
         return f"{ABBR[m.group(1)]} {int(m.group(2))}"
+    return s
+
+def _norm_district(label: str) -> str:
+    """
+    Normalize things like 'Sullivan 02' -> 'Sullivan 2', and '02' -> '2'.
+    Accepts abbrev, numeric-only, or 'County N' and returns a consistent form.
+    """
+    s = _expand_label((label or "").strip())
+    m = re.match(r"^([A-Za-z]+)\s*0*([0-9]+)$", s)
+    if m:
+        return f"{m.group(1).title()} {int(m.group(2))}"
+    m2 = re.match(r"^0*([0-9]+)$", s)
+    if m2:
+        return str(int(m2.group(1)))
     return s
 
 def _dedupe_people(people: List[dict]) -> List[dict]:
@@ -142,7 +139,7 @@ def load_floterial_maps() -> Tuple[Dict[str, set], Dict[Tuple[str, str], set]]:
 # ---------------- GEOCODING ----------------
 def geocode_oneline(addr: str) -> Tuple[float, float, dict]:
     """
-    First Census onelineaddress; fall back to Nominatim. Returns (lat, lon, {town, county, geocoder})
+    Census onelineaddress → lat/lon; fallback to Nominatim. Returns (lat, lon, {town, county, geocoder})
     """
     try:
         r = _http_get(CENSUS_ADDR_URL, params={"address": addr, "benchmark": "Public_AR_Current", "format": "json"})
@@ -182,7 +179,6 @@ def census_sldl_from_coords(lat: float, lon: float) -> Optional[str]:
         sldl = geogs.get("State Legislative Districts - Lower", []) or geogs.get("State Legislative Districts - Lower Chamber", [])
         if sldl:
             rec = sldl[0]
-            # BASENAME is usually the number; NAME sometimes contains the number too.
             base = str(rec.get("BASENAME") or "").strip()
             if base:
                 return str(int(base))  # strip leading zeros
@@ -195,6 +191,15 @@ def census_sldl_from_coords(lat: float, lon: float) -> Optional[str]:
     return None
 
 # ---------------- OPENSTATES ----------------
+def _is_lower_nh(role: dict) -> bool:
+    lower = (role.get("org_classification") == "lower") or (role.get("chamber") == "lower")
+    jur = role.get("jurisdiction")
+    if isinstance(jur, dict):
+        jur = (jur.get("name") or "").lower()
+    else:
+        jur = (jur or "").lower()
+    return lower and ("new hampshire" in jur)
+
 def openstates_people_geo(lat: float, lon: float) -> List[dict]:
     headers = {"X-API-KEY": OPENSTATES_API_KEY} if OPENSTATES_API_KEY else {}
     r = _http_get(OS_PEOPLE_GEO, params={"lat": lat, "lng": lon}, headers=headers)
@@ -204,15 +209,6 @@ def openstates_people_geo(lat: float, lon: float) -> List[dict]:
     if isinstance(j, list):
         return j
     return []
-
-def _is_lower_nh(role: dict) -> bool:
-    lower = (role.get("org_classification") == "lower") or (role.get("chamber") == "lower")
-    jur = role.get("jurisdiction")
-    if isinstance(jur, dict):
-        jur = (jur.get("name") or "").lower()
-    else:
-        jur = (jur or "").lower()
-    return lower and ("new hampshire" in jur)
 
 def _pick_house_members_from_people_geo(people: List[dict]) -> List[dict]:
     out: List[dict] = []
@@ -229,7 +225,7 @@ def _pick_house_members_from_people_geo(people: List[dict]) -> List[dict]:
             "district": _norm_district(role.get("district") or ""),
             "email": p.get("email"),
             "phone": p.get("voice"),
-            "links": [{"url": L.get("url")} for L in (p.get("links") or []) if L and L.get("url")],
+            "links": [{"url": L.get("url")} for L in (p.get("links") or []) if L and L.get("url")}],
         })
     return out
 
@@ -242,7 +238,6 @@ def openstates_search_lower_nh(params: dict) -> List[dict]:
             j = j["results"] or []
         out = []
         for p in j:
-            # Grab a lower NH role if present to normalize district label
             role = p.get("current_role") or {}
             if not _is_lower_nh(role):
                 role = next((r for r in (p.get("roles") or []) if _is_lower_nh(r)), {})
@@ -253,7 +248,7 @@ def openstates_search_lower_nh(params: dict) -> List[dict]:
                 "district": _norm_district(role.get("district") or params.get("district") or ""),
                 "email": p.get("email"),
                 "phone": p.get("voice"),
-                "links": [{"url": L.get("url")} for L in (p.get("links") or []) if L and L.get("url")],
+                "links": [{"url": L.get("url")} for L in (p.get("links") or []) if L and L.get("url")}],
             })
         return out
     except Exception:
@@ -308,11 +303,11 @@ def lookup_legislators():
         return jsonify({"success": False, "error": "geocoding_failed"}), 400
     town = meta.get("town"); county = meta.get("county")
 
-    # 2) Compute SLDL base district via Census (independent of your CSVs)
+    # 2) Base SLDL from Census (CSV-independent)
     sldl_num = census_sldl_from_coords(lat, lon)  # e.g., '2'
-    sldl_label = f"{county} {sldl_num}" if county and sldl_num else None  # normalized later
+    sldl_label = f"{county} {sldl_num}" if county and sldl_num else None
 
-    # 3) people.geo baseline (prefer when available)
+    # 3) people.geo (no early return)
     house_from_geo: List[dict] = []
     if not force_fallback:
         try:
@@ -329,43 +324,41 @@ def lookup_legislators():
             county = next(iter(poss))
     overlay_labels = sorted(list(town_map.get(_key(town, county), set())))
 
-    # 5) Build a robust district query set:
-    #    - overlay floterials
-    #    - base by SLDL number (always include)
-    #    - plus the base(s) connected to those floterials via base_map
-    districts_to_try = set(_norm_district(d) for d in overlay_labels if d)
+    # 5) Districts to query (robust)
+    districts_to_try = set()
+    for p in (house_from_geo or []):
+        if p.get("district"):
+            districts_to_try.add(_norm_district(p["district"]))
+    for d in overlay_labels:
+        if d:
+            districts_to_try.add(_norm_district(d))
     if sldl_num:
-        districts_to_try.add(_norm_district(sldl_num))     # numeric form
+        districts_to_try.add(_norm_district(sldl_num))      # '2'
     if sldl_label:
-        districts_to_try.add(_norm_district(sldl_label))   # 'County N' form
+        districts_to_try.add(_norm_district(sldl_label))    # 'Sullivan 2', etc.
 
-    # link base <- floterial
+    # link base <- floterial via CSV
     for b, fset in (base_map or {}).items():
         if fset & districts_to_try:
             districts_to_try.add(_norm_district(b))
 
-    # Also pull any districts already present from people.geo (defensive)
-    for p in house_from_geo or []:
-        if p.get("district"):
-            districts_to_try.add(_norm_district(p["district"]))
+    # 6) Query OpenStates /people for each district; merge with people.geo; dedupe
+    reps: List[dict] = house_from_geo[:]
 
-    # 6) Query OpenStates /people for each district variant and merge
-    reps: List[dict] = house_from_geo[:]  # start with people.geo baseline if present
-    if districts_to_try:
-        for d in sorted(districts_to_try):
-            if not d:
-                continue
-            variants = [
-                {"jurisdiction": "New Hampshire", "chamber": "lower", "district": d},
-                {"state": "NH", "chamber": "lower", "district": d},
-            ]
-            # numeric-only variant (OpenStates accepts just the number for NH House)
-            m = re.fullmatch(r"(\d+)", d)
-            if m:
-                variants.append({"state": "NH", "chamber": "lower", "district": m.group(1)})
+    def _fetch(params: dict) -> Iterable[dict]:
+        return openstates_search_lower_nh(params)
 
-            for params in variants:
-                reps.extend(openstates_search_lower_nh(params))
+    for d in sorted(districts_to_try):
+        if not d:
+            continue
+        variants = [
+            {"jurisdiction": "New Hampshire", "chamber": "lower", "district": d},
+            {"state": "NH", "chamber": "lower", "district": d},
+        ]
+        if re.fullmatch(r"(\d+)", d):
+            variants.append({"state": "NH", "chamber": "lower", "district": d})
+        for params in variants:
+            reps.extend(_fetch(params))
 
     reps = _dedupe_people(reps)
 
@@ -380,6 +373,7 @@ def lookup_legislators():
             "geocoder": meta.get("geocoder"),
             "openstates_geo_used": bool(house_from_geo) and not force_fallback,
             "overlay_labels": sorted(list(overlay_labels)),
+            "districts_queried": sorted(list(districts_to_try)),
         },
         "stateRepresentatives": reps,
     })
